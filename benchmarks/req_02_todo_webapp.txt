@@ -1,0 +1,141 @@
+REQUIREMENT DOCUMENT
+Project: Web-Based To-Do Application
+Version: 1.0
+Purpose: Benchmarking code assistant tools
+=========================================
+
+
+OVERVIEW
+--------
+Build a single-page to-do application served by a Python backend (Flask or
+FastAPI). The frontend must be plain HTML, CSS, and JavaScript — no frontend
+framework. Data persists in a SQLite database. The app must work correctly
+with JavaScript disabled (progressive enhancement is a bonus, not required).
+
+
+FUNCTIONAL REQUIREMENTS
+-----------------------
+
+1. TASK MANAGEMENT
+   1.1  Create a task with a title (required) and an optional due date.
+   1.2  Mark a task as complete / incomplete (toggle).
+   1.3  Edit the title and due date of an existing task.
+   1.4  Delete a single task.
+   1.5  Delete all completed tasks in one action ("Clear completed" button).
+
+2. CATEGORIES / LABELS
+   2.1  A task can belong to exactly one category (e.g. Work, Personal, Shopping).
+   2.2  Users can create and delete categories.
+   2.3  Deleting a category moves its tasks to a default "Uncategorised" category.
+
+3. FILTERING AND SORTING
+   3.1  Filter tasks by status: All | Active | Completed.
+   3.2  Filter tasks by category (dropdown).
+   3.3  Sort tasks by: creation date (default) | due date | title (A-Z).
+   3.4  Filters and sort selection persist across page reloads (use localStorage
+        or query parameters — implementer's choice).
+
+4. SEARCH
+   4.1  A search box filters the visible task list in real time (client-side).
+   4.2  Search matches against the task title, case-insensitively.
+   4.3  Clearing the search box restores the full filtered list.
+
+5. TASK COUNTER
+   5.1  Display a live count of active (incomplete) tasks, e.g. "3 tasks left".
+   5.2  The counter updates immediately on any create / complete / delete action.
+
+6. DUE DATE HANDLING
+   6.1  Tasks with a due date in the past and not completed are highlighted
+        visually (e.g. red text or a warning icon).
+   6.2  Tasks due today are highlighted differently (e.g. amber / orange).
+
+7. DRAG-AND-DROP REORDERING (OPTIONAL BONUS)
+   7.1  Tasks within the current filter view can be reordered by dragging.
+   7.2  The new order persists (stored in the database as a position field).
+
+8. API
+   8.1  The backend exposes a JSON REST API under /api/:
+          GET    /api/tasks              list tasks (supports ?status=&category=&sort=)
+          POST   /api/tasks              create task
+          PATCH  /api/tasks/{id}         update task (title, done, due_date, category_id)
+          DELETE /api/tasks/{id}         delete task
+          DELETE /api/tasks/completed    delete all completed tasks
+          GET    /api/categories         list categories
+          POST   /api/categories         create category
+          DELETE /api/categories/{id}    delete category
+   8.2  All responses use JSON with consistent envelope:
+          { "data": ..., "error": null }   on success
+          { "data": null, "error": "..." } on failure
+   8.3  HTTP status codes must be correct (200, 201, 204, 400, 404).
+
+
+NON-FUNCTIONAL REQUIREMENTS
+---------------------------
+
+9.  BACKEND STRUCTURE
+    9.1  Organise the backend as:
+           app/
+             __init__.py     app factory
+             models.py       SQLAlchemy models (Task, Category)
+             routes.py       Flask/FastAPI route definitions
+             database.py     DB initialisation and session management
+           run.py            entry point: python run.py
+
+10. FRONTEND STRUCTURE
+    10.1 All frontend assets live in app/static/:
+           app/static/index.html
+           app/static/style.css
+           app/static/app.js
+    10.2 The frontend communicates exclusively through the /api/ endpoints using
+         the Fetch API.
+    10.3 No jQuery, React, Vue, or any JS framework.
+
+11. DATABASE
+    11.1 SQLite file stored at  data/todo.db  (created automatically on first run).
+    11.2 SQLAlchemy must be used for all DB access (no raw SQL in route handlers).
+    11.3 Schema migrations are not required; recreating the DB on startup is
+         acceptable for this benchmark.
+
+12. STYLING
+    12.1 The UI must be usable on a 375 px wide screen (mobile) and a 1280 px
+         desktop without horizontal scrolling.
+    12.2 Use CSS custom properties (variables) for at least the colour palette.
+    12.3 Completed tasks are visually distinct (e.g. strikethrough + dimmed text).
+
+13. ERROR HANDLING
+    13.1 The API must return a 400 with a descriptive message if a task is created
+         with an empty title.
+    13.2 Requesting a non-existent task ID returns 404.
+    13.3 The frontend displays a non-blocking error toast/banner on API failure.
+
+14. TESTS
+    14.1 A test file tests/test_api.py must be provided.
+    14.2 Tests must cover: create task, list tasks, update task, delete task,
+         create category, delete category, 404 for missing task, 400 for empty title.
+    14.3 Tests use pytest and the backend's test client — no live server required.
+    14.4 All tests pass with  pytest.
+
+15. DEPENDENCIES
+    15.1 Backend: flask or fastapi, sqlalchemy, and their minimal dependencies.
+    15.2 Frontend: no external JS/CSS libraries.
+    15.3 A requirements.txt or pyproject.toml must list all dependencies with
+         pinned or minimum versions.
+
+
+ACCEPTANCE CRITERIA
+-------------------
+
+AC-1  Running  python run.py  starts the server; visiting  http://localhost:5000
+      (or :8000 for FastAPI) shows the to-do UI.
+AC-2  A task can be created, marked complete, edited, and deleted entirely
+      through the UI without page reloads.
+AC-3  After a page hard-refresh, all tasks and categories are still present
+      (data persisted in SQLite).
+AC-4  Filtering by "Completed" shows only completed tasks; "Active" shows only
+      incomplete tasks.
+AC-5  A task with a past due date is visually highlighted in red / warning colour.
+AC-6  DELETE /api/tasks/completed removes only completed tasks; active tasks
+      are unaffected.
+AC-7  All tests in tests/test_api.py pass with  pytest.
+AC-8  The layout is usable on a 375 px mobile viewport (no horizontal scroll,
+      buttons are tap-target sized — at least 44 px height).

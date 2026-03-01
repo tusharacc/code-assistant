@@ -1,0 +1,109 @@
+REQUIREMENT DOCUMENT
+Project: Python Command-Line Calculator
+Version: 1.0
+Purpose: Benchmarking code assistant tools
+=========================================
+
+
+OVERVIEW
+--------
+Build a command-line calculator in Python that supports basic arithmetic,
+a short expression history, and a simple plugin hook for custom operations.
+The calculator must run interactively (REPL loop) and also accept a single
+expression as a command-line argument for non-interactive use.
+
+
+FUNCTIONAL REQUIREMENTS
+-----------------------
+
+1. OPERATIONS
+   1.1  Addition          (+)
+   1.2  Subtraction       (-)
+   1.3  Multiplication    (*)
+   1.4  Division          (/)   — must raise a clear error on divide-by-zero
+   1.5  Integer division  (//)
+   1.6  Modulo            (%)
+   1.7  Exponentiation    (**)
+   1.8  Square root       (sqrt)
+   1.9  Absolute value    (abs)
+   1.10 Factorial         (fact)  — integer input only; error on negative input
+
+2. INPUT FORMAT
+   2.1  The user types a mathematical expression as a string, e.g.
+          > 3 + 4 * 2
+          > sqrt(16)
+          > fact(5)
+   2.2  Standard operator precedence must be respected (PEMDAS/BODMAS).
+   2.3  Parentheses must be supported for grouping.
+   2.4  Both integer and floating-point numbers must be handled.
+
+3. OUTPUT FORMAT
+   3.1  The result is printed on the next line.
+   3.2  Integers are displayed without a decimal point (e.g. 10, not 10.0).
+   3.3  Floats are displayed rounded to 6 significant figures.
+
+4. HISTORY
+   4.1  The calculator keeps the last 10 results in memory.
+   4.2  The user can reference a previous result using ans, ans1, ans2, ...
+          ans   → most recent result
+          ans1  → second most recent, and so on
+   4.3  The command  history  prints a numbered list of the last 10 results.
+   4.4  The command  clear    empties the history.
+
+5. SPECIAL COMMANDS
+   5.1  help    — print a short usage summary
+   5.2  history — print the result history (see 4.3)
+   5.3  clear   — clear the result history
+   5.4  exit / quit / Ctrl-D — exit the calculator
+
+6. PLUGIN HOOK
+   6.1  Provide a public function  register_operation(name, func)  that other
+        Python code can call to add a custom unary or binary operation.
+   6.2  Registered operations are callable by name in the REPL, e.g.
+          register_operation("double", lambda x: x * 2)
+          > double(7)   →  14
+   6.3  Name collisions with built-in operations must raise a ValueError.
+
+7. COMMAND-LINE ARGUMENT MODE
+   7.1  Running  python calculator.py "3 + 4 * 2"  evaluates the expression,
+        prints the result, and exits immediately (no REPL loop).
+   7.2  Exit code 0 on success, 1 on evaluation error.
+
+
+NON-FUNCTIONAL REQUIREMENTS
+---------------------------
+
+8.  STRUCTURE
+    8.1  The code must be organised into at least two modules:
+           calculator/core.py   — evaluation engine and plugin registry
+           calculator/repl.py   — REPL loop and command handling
+           calculator/__main__.py — entry point
+
+9.  ERROR HANDLING
+    9.1  Invalid expressions print a human-readable error message and do not
+         crash the REPL.
+    9.2  All errors must be caught and reported without a traceback visible to
+         the user.
+
+10. TESTS
+    10.1 A test file tests/test_calculator.py must be provided.
+    10.2 Tests must cover: each operation, history reference (ans), divide-by-zero,
+         factorial of a negative number, and plugin registration.
+    10.3 Tests must be runnable with  pytest  and pass without any network access.
+
+11. DEPENDENCIES
+    11.1 Standard library only — no third-party packages except pytest for tests.
+
+
+ACCEPTANCE CRITERIA
+-------------------
+
+AC-1  Running  python -m calculator  starts an interactive REPL that accepts
+      expressions and prints results.
+AC-2  Running  python -m calculator "2 ** 10"  prints  1024  and exits.
+AC-3  Dividing by zero prints an error message; the REPL continues.
+AC-4  fact(-1)  prints an error message; the REPL continues.
+AC-5  After three calculations, typing  ans  returns the most recent result.
+AC-6  A custom operation registered with register_operation is callable in
+      the REPL immediately.
+AC-7  All tests in tests/test_calculator.py pass with  pytest.
