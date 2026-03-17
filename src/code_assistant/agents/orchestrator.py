@@ -4,6 +4,8 @@ Orchestrator — decides whether to run single-agent, dual-agent debate, or full
 """
 from __future__ import annotations
 
+import re
+
 from ..config import config
 from ..logger import get_logger
 from ..ui.console import console, print_debate_separator, print_rule, print_info
@@ -13,28 +15,50 @@ from .implementer import make_implementer
 
 log = get_logger(__name__)
 
-
-# Heuristic: words that suggest a complex coding task worth debating
-_COMPLEX_SIGNALS = {
-    "implement", "write", "create", "build", "design", "refactor",
-    "architecture", "system", "module", "class", "algorithm", "optimize",
-    "restructure", "rewrite",
-}
-
-_SIMPLE_SIGNALS = {
-    "explain", "what", "why", "how does", "show me", "read", "list",
-    "find", "search", "tell me", "describe",
-}
+# Same Q&A tag the implementer uses to ask the architect a question
+_QA_TAG = re.compile(r"@@QUESTION_FOR_ARCHITECT:\s*(.*?)@@", re.DOTALL)
+_MAX_QA_ROUNDS = 5
 
 
-def _is_complex_task(text: str) -> bool:
-    """Rough heuristic: should we invoke dual-agent debate?"""
-    lowered = text.lower()
-    # If the request is short and looks explanatory, skip debate
-    if any(lowered.startswith(s) for s in _SIMPLE_SIGNALS):
-        return False
-    # If it contains complexity signals, debate
-    return any(signal in lowered for signal in _COMPLEX_SIGNALS)
+_INTENT_SYSTEM = (
+    "Classify this coding-assistant request into exactly one word:\n"
+    "  conversational — questions, explanations, or analysis of existing code\n"
+    "  implementation — writing, fixing, or editing code or files\n"
+    "  complex        — large new systems, complete features, or major refactors\n"
+    "Reply with only one word: conversational, implementation, or complex"
+)
+
+
+def _classify_intent(text: str) -> str:
+    """
+    LLM-based intent classification. Returns one of:
+      'conversational' — route to Architect (Q&A, fast 7B, no tools)
+      'implementation' — route to Implementer (code gen, 14B, tools)
+      'complex'        — route to debate or pipeline
+
+    Falls back to 'implementation' on any error so the REPL never breaks.
+    """
+    import ollama as _ollama
+    try:
+        resp = _ollama.chat(
+            model=config.effective_classification_model(),
+            messages=[
+                {"role": "system", "content": _INTENT_SYSTEM},
+                {"role": "user",   "content": text},
+            ],
+            stream=False,
+            options={"temperature": 0.0, "num_predict": 10},
+        )
+        raw = resp.message.content.strip().lower().split()[0].rstrip(".,:")
+        for valid in ("conversational", "implementation", "complex"):
+            if raw.startswith(valid[:6]):
+                log.debug("Intent classified | label=%s input=%s", valid, text[:80])
+                return valid
+        log.warning("Intent classification | unexpected label=%r, defaulting to implementation", raw)
+        return "implementation"
+    except Exception as e:
+        log.warning("Intent classification failed (%s), defaulting to implementation", e)
+        return "implementation"
 
 
 class Orchestrator:
@@ -87,15 +111,23 @@ class Orchestrator:
         (to be appended to history by the caller).
 
         Mode selection (in priority order):
-          1. pipeline — if pipeline_enabled and complex task
-          2. debate   — if debate_enabled and complex task
-          3. single   — implementer only
+          1. pipeline       — if pipeline_enabled and complex task
+          2. debate         — if debate_enabled and complex task
+          3. conversational — question / explanation request → Architect
+          4. single         — implementation task → Implementer
         """
-        is_complex = _is_complex_task(user_input)
-        use_pipeline = self.pipeline_enabled and is_complex
-        use_debate = not use_pipeline and self.debate_enabled and is_complex
+        intent = _classify_intent(user_input)
 
-        mode = "pipeline" if use_pipeline else ("debate" if use_debate else "single")
+        is_complex         = intent == "complex"
+        use_pipeline       = self.pipeline_enabled and is_complex
+        use_debate         = not use_pipeline and self.debate_enabled and is_complex
+        use_conversational = intent == "conversational" and not use_pipeline and not use_debate
+
+        if use_pipeline:         mode = "pipeline"
+        elif use_debate:         mode = "debate"
+        elif use_conversational: mode = "conversational"
+        else:                    mode = "single"
+
         log.info(
             "Turn start | mode=%s pipeline_enabled=%s debate_enabled=%s input_chars=%d",
             mode, self.pipeline_enabled, self.debate_enabled, len(user_input),
@@ -106,17 +138,87 @@ class Orchestrator:
             return self._run_pipeline(user_input)
         elif use_debate:
             return self._run_debate([Message(role="user", content=user_input)])
+        elif use_conversational:
+            return self._run_architect_only([Message(role="user", content=user_input)])
         else:
             return self._run_single([Message(role="user", content=user_input)])
+
+    # ------------------------------------------------------------------
+    # Conversational mode — architect only, no tools
+    # ------------------------------------------------------------------
+
+    def _run_architect_only(self, messages_this_turn: list[Message]) -> list[Message]:
+        """Handle informational / Q&A queries with the Architect persona.
+
+        The Architect is faster (7B), uses no tools, and its system prompt is
+        tuned for reasoning and explanation rather than code generation.
+        """
+        working_history = self.history + messages_this_turn
+        _, new_msgs = self.architect.run(working_history, rag_context=self.rag_context)
+        return messages_this_turn + new_msgs
 
     # ------------------------------------------------------------------
     # Single-agent mode — implementer only
     # ------------------------------------------------------------------
 
     def _run_single(self, messages_this_turn: list[Message]) -> list[Message]:
-        full_history = self.history + messages_this_turn
-        _, new_msgs = self.implementer.run(full_history, rag_context=self.rag_context)
-        return messages_this_turn + new_msgs
+        """
+        Single-agent mode. If the implementer emits @@QUESTION_FOR_ARCHITECT:...@@
+        the question is routed to the architect, whose answer is fed back so the
+        implementer can continue. The architect is always available.
+        """
+        all_new: list[Message] = []
+        working_history = self.history + messages_this_turn
+        arch_history: list[Message] = list(self.history)   # separate context for architect
+
+        for round_num in range(_MAX_QA_ROUNDS + 1):
+            impl_text, new_msgs = self.implementer.run(
+                working_history, rag_context=self.rag_context
+            )
+            working_history.extend(new_msgs)
+            all_new.extend(new_msgs)
+
+            m = _QA_TAG.search(impl_text)
+            if not m:
+                break   # clean response — done
+
+            question = m.group(1).strip()
+            log.info(
+                "Single mode Q&A round %d — routing to architect | q=%s",
+                round_num + 1, question[:120],
+            )
+            console.print(
+                f"\n[dim cyan]↳ Implementer asks architect: {question[:120]}…[/dim cyan]"
+            )
+
+            arch_q = Message(
+                role="user",
+                content=(
+                    f"The implementer is asking: {question}\n\n"
+                    "Please answer concisely and directly."
+                ),
+            )
+            arch_history.append(arch_q)
+            arch_ans_text, arch_ans_msgs = self.architect.run(
+                arch_history, rag_context=self.rag_context
+            )
+            arch_history.extend(arch_ans_msgs)
+
+            console.print(
+                f"[dim cyan]↳ Architect answers: {arch_ans_text[:120]}…[/dim cyan]\n"
+            )
+
+            working_history.append(Message(
+                role="user",
+                content=(
+                    f"Architect's answer: {arch_ans_text}\n\n"
+                    "Please continue implementing."
+                ),
+            ))
+        else:
+            log.warning("Single mode: Q&A rounds exceeded %d, stopping", _MAX_QA_ROUNDS)
+
+        return messages_this_turn + all_new
 
     # ------------------------------------------------------------------
     # Dual-agent debate mode
@@ -205,17 +307,60 @@ class Orchestrator:
         print_rule("implementing", style="dim green")
         log.info("Debate complete — implementer executing final plan")
 
-        # ── Final: Implementer executes ──────────────────────────────
+        # ── Final: Implementer executes (with Q&A routing to architect) ──
         execute_prompt = (
             f"The agreed plan is:\n\n{final_plan}\n\n"
             f"Original task: {messages_this_turn[-1].content if messages_this_turn else ''}\n\n"
             "Now implement it completely. Use your tools to create and modify files."
         )
-        execute_msgs = full_history + [Message(role="user", content=execute_prompt)]
-        _, execute_response = self.implementer.run(
-            execute_msgs, rag_context=self.rag_context
-        )
-        all_new.extend(execute_response)
+        exec_history = full_history + [Message(role="user", content=execute_prompt)]
+        arch_history_exec = list(full_history)   # separate copy for architect Q&A
+
+        for round_num in range(_MAX_QA_ROUNDS + 1):
+            impl_text, exec_response = self.implementer.run(
+                exec_history, rag_context=self.rag_context
+            )
+            exec_history.extend(exec_response)
+            all_new.extend(exec_response)
+
+            m = _QA_TAG.search(impl_text)
+            if not m:
+                break   # clean — implementation done
+
+            question = m.group(1).strip()
+            log.info(
+                "Debate execute Q&A round %d | question=%s", round_num + 1, question[:120]
+            )
+            console.print(
+                f"\n[dim cyan]↳ Implementer asks architect: {question[:120]}…[/dim cyan]"
+            )
+
+            arch_q = Message(
+                role="user",
+                content=(
+                    f"During implementation the implementer is asking: {question}\n\n"
+                    "Please answer concisely and directly."
+                ),
+            )
+            arch_history_exec.append(arch_q)
+            arch_ans_text, arch_ans_msgs = self.architect.run(
+                arch_history_exec, rag_context=self.rag_context
+            )
+            arch_history_exec.extend(arch_ans_msgs)
+
+            console.print(
+                f"[dim cyan]↳ Architect answers: {arch_ans_text[:120]}…[/dim cyan]\n"
+            )
+
+            exec_history.append(Message(
+                role="user",
+                content=(
+                    f"Architect's answer: {arch_ans_text}\n\n"
+                    "Please continue implementing."
+                ),
+            ))
+        else:
+            log.warning("Debate execute Q&A exceeded %d rounds, stopping", _MAX_QA_ROUNDS)
 
         return all_new
 
@@ -228,5 +373,8 @@ class Orchestrator:
         from .pipeline import Pipeline
 
         log.info("Pipeline mode activated")
-        pipeline = Pipeline(rag_context=self.rag_context)
+        pipeline = Pipeline(
+            rag_context=self.rag_context,
+            initial_history=self.history,   # carries loaded req-file into architect context
+        )
         return pipeline.run(user_input)

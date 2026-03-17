@@ -26,6 +26,9 @@ ca_logs/
 # Session saves
 projects/
 
+# Benchmark run outputs
+benchmarks/results/
+
 # IDE / editor
 .idea/
 .vscode/
@@ -35,3 +38,12 @@ projects/
 
 # dotenv
 .env
+
+# Auto-generated AI memory file (regenerated each pipeline run)
+code_assistant.md
+
+# Claude Code internal state (plans, memory — local only)
+.claude/
+
+# AST symbol index
+.ca_ast/

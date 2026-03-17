@@ -87,7 +87,23 @@ def print_success(msg: str) -> None:
 
 
 def confirm(prompt: str, default: bool = False) -> bool:
-    """Ask a y/n question, return bool."""
+    """Ask a y/n question, return bool.
+
+    Returns True immediately when:
+    - config.auto_approve is True (default) — approve all tool calls silently, OR
+    - stdin is not a TTY (pipeline / background / benchmark runs).
+
+    Use --no-auto-approve on the CLI (or CA_AUTO_APPROVE=false) to be prompted
+    for every write_file / edit_file / run_shell call.
+    """
+    import sys
+    from ..config import config
+    if config.auto_approve:
+        return True
+    if not sys.stdin.isatty():
+        console.print(f"[dim]{prompt} → auto-confirmed (non-interactive)[/dim]")
+        return True
+
     hint = "[Y/n]" if default else "[y/N]"
     while True:
         console.print(f"[confirm]{prompt} {hint}:[/confirm] ", end="")

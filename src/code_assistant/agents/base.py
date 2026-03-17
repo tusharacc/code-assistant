@@ -71,12 +71,19 @@ class Agent:
         self.use_tools = use_tools
         self._keep_alive = keep_alive  # None = Ollama default (5 min); 0 = unload immediately
         self._tools = get_tool_schemas() if use_tools else []
-        self._ollama_opts = {
+        self._ollama_opts: dict = {
             "num_threads": config.num_threads,
             "num_ctx": config.num_ctx,
             "num_batch": config.num_batch,
             "temperature": config.temperature,
         }
+        num_gpu = config.ollama_num_gpu()
+        if num_gpu is not None:
+            self._ollama_opts["num_gpu"] = num_gpu
+        # Accumulated token counts — read by benchmark harness
+        self.token_in: int = 0
+        self.token_out: int = 0
+        self.api_calls: int = 0
         log.debug(
             "Agent created | role=%s model=%s use_tools=%s",
             role_label, model, use_tools,
@@ -102,8 +109,31 @@ class Agent:
             print_agent_header(self.role_label)
 
         # Build the raw message list for Ollama
-        raw: list[dict] = [{"role": "system", "content": self._build_system(rag_context)}]
+        raw: list[dict] = [{"role": "system", "content": self.system_prompt}]
         raw.extend(m.to_dict() for m in messages)
+
+        if rag_context:
+            # Inject RAG context as a synthetic user/assistant pair immediately
+            # before the last user message — recency bias ensures the model
+            # attends to it rather than deprioritising it at the end of the
+            # system prompt.
+            insert_at = len(raw)
+            for idx in range(len(raw) - 1, -1, -1):
+                if raw[idx]["role"] == "user":
+                    insert_at = idx
+                    break
+            raw.insert(insert_at, {
+                "role": "assistant",
+                "content": "Understood. I will use this codebase context when answering.",
+            })
+            raw.insert(insert_at, {
+                "role": "user",
+                "content": (
+                    "Here is relevant codebase context retrieved from the RAG index. "
+                    "Reference specific files and line numbers when using it:\n\n"
+                    + rag_context
+                ),
+            })
 
         log.info(
             "Agent run start | role=%s model=%s messages=%d rag=%s",
@@ -177,13 +207,7 @@ class Agent:
     # Internal
     # ------------------------------------------------------------------
 
-    def _build_system(self, rag_context: str | None) -> str:
-        if rag_context:
-            return (
-                self.system_prompt
-                + "\n\n## Relevant codebase context (from RAG index)\n\n"
-                + rag_context
-            )
+    def _build_system(self) -> str:
         return self.system_prompt
 
     def _call_model(self, raw_messages: list[dict], silent: bool) -> tuple[str, list[dict]]:
@@ -212,7 +236,9 @@ class Agent:
 
         try:
             stream = ollama.chat(**kwargs)
+            last_chunk = None
             for chunk in stream:
+                last_chunk = chunk
                 msg = chunk.message
 
                 # Accumulate text content
@@ -234,6 +260,12 @@ class Agent:
 
             if not silent and text_accumulator:
                 console.print()  # newline after streamed content
+
+            # Capture token counts from the final chunk (Ollama only populates these there)
+            if last_chunk is not None:
+                self.token_in  += getattr(last_chunk, "prompt_eval_count", 0) or 0
+                self.token_out += getattr(last_chunk, "eval_count", 0) or 0
+            self.api_calls += 1
 
             if log.isEnabledFor(logging.DEBUG):
                 log.debug(
@@ -277,6 +309,7 @@ class Agent:
 _KNOWN_TOOLS = {
     "read_file", "write_file", "edit_file",
     "list_dir", "glob_files", "run_shell",
+    "search_codebase",
 }
 
 
@@ -284,41 +317,31 @@ def _try_parse_text_tool_calls(text: str) -> list[dict]:
     """
     Detect tool calls embedded as JSON anywhere in a model's text response.
 
-    Some model variants (e.g. qwen2.5-coder:32b) emit tool calls as JSON
-    code blocks inside the response content rather than through the API's
-    tool_calls field. They may emit multiple calls in one response, each
-    in its own ```json ... ``` fence.
+    Some model variants emit tool calls as JSON inside the response text
+    rather than through the API tool_calls field. The content may be:
+      - A ```json ... ``` fenced block (potentially containing nested fences
+        inside string values, e.g. README content with ```sh blocks)
+      - A bare JSON object anywhere in the text
 
     Strategy
     --------
-    1. Extract every ```json ... ``` (or ``` ... ```) block from the text.
-    2. Try to parse each block as a tool-call object.
-    3. Fall back to treating the whole text as one JSON blob if no blocks found.
-    4. Any object with a known tool name and a dict of arguments is accepted.
+    1. Use balanced-brace scanning to extract all top-level JSON objects.
+       This correctly handles { } inside JSON string values (including ones
+       that contain triple-backtick sequences) because it tracks string
+       boundaries and escape sequences character-by-character.
+    2. Try json.loads on each candidate.
+    3. Accept any object whose "name" is a known tool and "arguments" is a dict.
 
     Returns an empty list if nothing recognisable is found.
     """
     result: list[dict] = []
+    candidates = list(_extract_json_objects(text))
 
-    # ── Step 1: pull out all fenced JSON blocks ───────────────────────────────
-    # Matches ```json ... ``` or ``` ... ``` (non-greedy, DOTALL)
-    fence_pattern = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
-    blocks = fence_pattern.findall(text)
+    if not candidates:
+        # Last resort: try the entire text as one blob
+        candidates = [text.strip()]
 
-    # ── Step 2: also try bare JSON objects/arrays anywhere in the text ────────
-    # Find top-level { ... } blobs that aren't inside a fence
-    if not blocks:
-        # Remove fenced blocks first, then look for bare JSON
-        bare_text = fence_pattern.sub("", text).strip()
-        # Match outermost { ... } objects
-        brace_pattern = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\}", re.DOTALL)
-        blocks = brace_pattern.findall(bare_text)
-        # If nothing fenced or braced, treat the whole text as one blob
-        if not blocks:
-            blocks = [text.strip()]
-
-    # ── Step 3: parse each candidate block ───────────────────────────────────
-    for block in blocks:
+    for block in candidates:
         block = block.strip()
         if not block:
             continue
@@ -327,13 +350,10 @@ def _try_parse_text_tool_calls(text: str) -> list[dict]:
         except json.JSONDecodeError:
             continue
 
-        # Normalise: a single dict or a list of dicts
-        candidates = parsed if isinstance(parsed, list) else [parsed]
-
-        for item in candidates:
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
             if not isinstance(item, dict):
                 continue
-            # Support both {"name":..., "arguments":...} and nested {"function":{...}}
             name = (
                 item.get("name")
                 or (item.get("function") or {}).get("name")
@@ -344,10 +364,69 @@ def _try_parse_text_tool_calls(text: str) -> list[dict]:
 
     if result:
         log.debug(
-            "Fallback parser extracted %d tool call(s) from %d candidate block(s)",
-            len(result), len(blocks),
+            "Fallback parser extracted %d tool call(s) from %d candidate(s)",
+            len(result), len(candidates),
         )
     return result
+
+
+def _extract_json_objects(text: str):
+    """
+    Yield every top-level JSON object string found in `text` by tracking
+    balanced braces, string boundaries, and escape sequences.
+
+    This is robust against JSON strings that contain triple-backticks,
+    nested braces, or any other characters that confuse regex approaches.
+    """
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != '{':
+            i += 1
+            continue
+
+        # Found the start of a potential JSON object — scan to matching '}'
+        depth = 0
+        in_string = False
+        escape_next = False
+        start = i
+        j = i
+
+        while j < n:
+            ch = text[j]
+
+            if escape_next:
+                escape_next = False
+                j += 1
+                continue
+
+            if ch == '\\' and in_string:
+                escape_next = True
+                j += 1
+                continue
+
+            if ch == '"':
+                in_string = not in_string
+                j += 1
+                continue
+
+            if in_string:
+                j += 1
+                continue
+
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    yield text[start:j + 1]
+                    i = j + 1
+                    break
+
+            j += 1
+        else:
+            # Ran off the end without closing — not a valid object
+            i += 1
 
 
 def _truncate(text: str, max_chars: int) -> str:

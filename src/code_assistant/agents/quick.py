@@ -21,7 +21,7 @@ Rules:
 
 def make_quick_agent() -> Agent:
     return Agent(
-        model=config.architect_model,   # 7B — fastest available
+        model=config.effective_architect_model(),   # 7B (or GPU preset if device=metal/cuda)
         system_prompt=QUICK_SYSTEM,
         role_label="quick",
         use_tools=False,                # read-only answers, never touches the filesystem

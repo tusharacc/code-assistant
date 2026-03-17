@@ -20,6 +20,19 @@ dependencies = [
 [project.scripts]
 ca = "code_assistant.main:run"
 
+[project.optional-dependencies]
+benchmark = ["anthropic>=0.40.0"]
+ast = [
+    "tree-sitter>=0.22.0",
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+]
+# Free web search fallback — only needed if you don't have a serper_api_key.
+# fetch_url works with no extra deps (stdlib urllib).
+web = ["duckduckgo-search>=6.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/code_assistant"]
 

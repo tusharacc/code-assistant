@@ -50,6 +50,33 @@ _COMPILED_PATTERNS: dict[str, re.Pattern] = {
     for ext, pats in _LANG_PATTERNS.items()
 }
 
+# Extension → language string for code-fence labels in retrieval output
+_EXT_TO_LANG: dict[str, str] = {
+    ".py":   "python",
+    ".js":   "javascript",
+    ".ts":   "typescript",
+    ".tsx":  "tsx",
+    ".jsx":  "jsx",
+    ".go":   "go",
+    ".rs":   "rust",
+    ".java": "java",
+    ".cpp":  "cpp",
+    ".c":    "c",
+    ".rb":   "ruby",
+    ".php":  "php",
+    ".sh":   "bash",
+    ".bash": "bash",
+    ".sql":  "sql",
+    ".html": "html",
+    ".css":  "css",
+    ".scss": "scss",
+    ".yaml": "yaml",
+    ".yml":  "yaml",
+    ".json": "json",
+    ".toml": "toml",
+    ".md":   "markdown",
+}
+
 # File extensions we'll index
 _INDEXABLE_EXTENSIONS = set(_LANG_PATTERNS.keys()) | {
     ".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".ini", ".sh", ".bash",
@@ -212,12 +239,26 @@ class CodebaseIndexer:
         self, file_path: Path, root: Path, chunks: list[str], file_hash: str
     ) -> None:
         rel = str(file_path.relative_to(root))
+        lang = _EXT_TO_LANG.get(file_path.suffix.lower(), "")
+        is_semantic = file_path.suffix.lower() in _LANG_PATTERNS
         ids, docs, metas = [], [], []
         for i, chunk in enumerate(chunks):
             chunk_id = _chunk_id(rel, i, chunk)
             ids.append(chunk_id)
             docs.append(chunk)
-            metas.append({"file": rel, "chunk_index": i, "file_hash": file_hash})
+            line_start, line_end = _parse_line_range_from_prefix(chunk)
+            chunk_type  = _classify_chunk_type(chunk, is_semantic)
+            symbol_name = _extract_symbol_name(chunk)
+            metas.append({
+                "file":        rel,
+                "chunk_index": i,
+                "file_hash":   file_hash,
+                "language":    lang,
+                "line_start":  line_start,
+                "line_end":    line_end,
+                "chunk_type":  chunk_type,
+                "symbol_name": symbol_name,
+            })
 
         # Upsert in batches of 64 to avoid memory spikes
         batch = 64
@@ -264,7 +305,12 @@ def _semantic_chunks(text: str, pattern: re.Pattern, filename: str) -> list[str]
     for start, end in zip(split_points, split_points[1:]):
         chunk = "".join(lines[start:end])
         if chunk.strip():
-            raw_chunks.append(f"# file: {filename}\n" + chunk)
+            # 1-based line numbers; end-1 because split_points[i+1] is exclusive
+            line_start = start + 1
+            line_end   = max(start + 1, end)  # end is exclusive index
+            raw_chunks.append(
+                f"# file: {filename} | L{line_start}-L{line_end}\n" + chunk
+            )
 
     result: list[str] = []
     for chunk in raw_chunks:
@@ -286,6 +332,45 @@ def _fixed_chunks(text: str, size: int | None = None, overlap: int | None = None
         chunks.append(text[start:end])
         start += sz - ov
     return chunks
+
+
+# ── Metadata helpers ──────────────────────────────────────────────────────────
+
+# Pre-compiled regex constants for metadata extraction
+_SYMBOL_RE  = re.compile(
+    r"^\s*(?:pub\s+)?(?:async\s+)?(?:def|class|fn|func|function|struct|impl|trait|enum|interface|type)\s+(\w+)",
+    re.MULTILINE,
+)
+_LINE_RANGE_RE = re.compile(r"\| L(\d+)-L(\d+)")
+_CLASS_RE      = re.compile(r"^\s*(?:pub\s+)?class\s+\w+", re.MULTILINE)
+_FUNC_RE       = re.compile(
+    r"^\s*(?:pub\s+)?(?:async\s+)?(?:def|fn|func|function)\s+\w+", re.MULTILINE
+)
+
+
+def _extract_symbol_name(chunk_body: str) -> str:
+    """Return the first defined symbol name found in the chunk, or empty string."""
+    m = _SYMBOL_RE.search(chunk_body)
+    return m.group(1) if m else ""
+
+
+def _parse_line_range_from_prefix(chunk: str) -> tuple[int, int]:
+    """Extract start/end line numbers from a '# file: path | L42-L67' prefix."""
+    m = _LINE_RANGE_RE.search(chunk)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return 0, 0
+
+
+def _classify_chunk_type(chunk: str, is_semantic: bool) -> str:
+    """Return 'class', 'function', 'module', or 'text'."""
+    if not is_semantic:
+        return "text"
+    if _CLASS_RE.search(chunk):
+        return "class"
+    if _FUNC_RE.search(chunk):
+        return "function"
+    return "module"
 
 
 def _chunk_id(rel_path: str, index: int, content: str) -> str:
