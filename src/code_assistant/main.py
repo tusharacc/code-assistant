@@ -52,41 +52,50 @@ app = typer.Typer(add_completion=False)
 # ── ca.config template ────────────────────────────────────────────────────────
 
 _CA_CONFIG_TEMPLATE = """\
-# code-assistant project configuration  (project-level overrides)
-# Place this file in your project root.
-# Restart `ca` after editing to apply changes.
-# Run `/config` inside ca to see the active value and source of each setting.
+# code-assistant project configuration
+# Auto-generated on first launch — values shown are your current effective defaults.
+# Uncomment and edit any line to override it for this project only.
+# Restart `ca` after saving.  Run `/config` to see the active source of each setting.
 #
-# Machine-level defaults live in: ~/.code-assistant/config.toml (same format).
-# Create that file for settings that should apply to ALL projects on this machine.
-#
+# Machine-level settings live in: ~/.code-assistant/config.toml
+# Settings NOT listed here (feedback, sessions, log dirs) can only go there.
+
+# ── Device / GPU ─────────────────────────────────────────────────────────────
+# device = "{device}"   # auto | cpu | metal | cuda
+
 # ── Models ───────────────────────────────────────────────────────────────────
-# implementer_model = "{implementer_model}"   # model for writing/editing code
-# architect_model   = "{architect_model}"     # model for planning & design
-# reviewer_model    = "{reviewer_model}"      # model for code review
-# tester_model      = "{tester_model}"        # model for running acceptance tests
+# architect_model   = "{architect_model}"
+# implementer_model = "{implementer_model}"
+# reviewer_model    = "{reviewer_model}"
+# tester_model      = "{tester_model}"
 #
+# GPU model presets — used when device = "metal" or "cuda"
+# gpu_architect_model   = "{gpu_architect_model}"
+# gpu_implementer_model = "{gpu_implementer_model}"
+#
+# Classification model (intent routing — keep this small and fast)
+# classification_model = "{classification_model}"
+
 # ── Inference ────────────────────────────────────────────────────────────────
-# num_ctx     = {num_ctx}    # context window in tokens (don't exceed available RAM)
-# num_threads = {num_threads}       # CPU inference threads
-# temperature = {temperature}     # 0.0 = deterministic, 1.0 = creative
-#
-# ── Pipeline behaviour ───────────────────────────────────────────────────────
-# use_pipeline  = false    # enable 4-persona pipeline by default for this project
-# auto_approve  = true     # auto-approve write_file / edit_file / run_shell
-# debate_rounds = {debate_rounds}
-#
+# num_ctx     = {num_ctx}     # context window tokens (don't exceed available RAM)
+# num_threads = {num_threads}      # CPU inference threads
+# temperature = {temperature}    # 0.0 = deterministic, 1.0 = creative
+
+# ── Pipeline & debate ────────────────────────────────────────────────────────
+# use_pipeline  = {use_pipeline}   # arch → impl → review → test → docs
+# auto_approve  = {auto_approve}    # auto-approve write_file / edit_file / run_shell
+# debate_enabled = {debate_enabled}
+# debate_rounds  = {debate_rounds}
+
 # ── RAG ──────────────────────────────────────────────────────────────────────
-# rag_top_k      = {rag_top_k}
-# rag_always_query = false    # query RAG on every input (ignores length threshold)
-#
+# rag_top_k        = {rag_top_k}
+# rag_always_query = {rag_always_query}
+
+# ── Web tools ────────────────────────────────────────────────────────────────
+# web_search_enabled = {web_search_enabled}   # requires duckduckgo-search or serper_api_key
+
 # ── Feature flags ────────────────────────────────────────────────────────────
-# project_context_enabled = true
-#
-# ── Machine-level only (do NOT set here — use ~/.code-assistant/config.toml) ─
-# feedback_enabled = true          # accumulates across ALL projects
-# feedback_dir     = "~/.code-assistant/feedback"  # shared pool for fine-tuning
-# few_shot_max     = 3             # examples injected per prompt
+# project_context_enabled = {project_context_enabled}
 """
 
 # ── RAG relevance heuristic ───────────────────────────────────────────────────
@@ -163,6 +172,14 @@ class REPL:
             loaded = load_session(resume)
             if loaded:
                 self.history.append(loaded)
+
+        # Auto-create ca.config on first launch in this directory.
+        # Shows the effective defaults (from machine config) as commented-out lines.
+        if not (Path.cwd() / "ca.config").exists():
+            try:
+                self._config_init(silent=True)
+            except Exception as _e:
+                self._log.warning("ca.config auto-create failed (non-fatal): %s", _e)
 
         # Silently generate code_assistant.md on first launch in this directory.
         # Purely programmatic — no LLM call, no console output.
@@ -563,29 +580,50 @@ class REPL:
             "in this directory.[/dim]"
         )
 
-    def _config_init(self) -> None:
-        """Write a commented ca.config template into the current directory."""
+    def _config_init(self, silent: bool = False) -> None:
+        """Write a commented ca.config template into the current directory.
+
+        silent=True — auto-called on first launch; prints a one-line hint instead
+                      of the full usage note (does NOT overwrite an existing file).
+        """
         dest = Path.cwd() / "ca.config"
         if dest.exists():
-            print_warning(f"ca.config already exists at {dest} — not overwriting.")
+            if not silent:
+                print_warning(f"ca.config already exists at {dest} — not overwriting.")
             return
         template = _CA_CONFIG_TEMPLATE.format(
-            implementer_model=config.implementer_model,
+            device=config.device,
             architect_model=config.architect_model,
+            implementer_model=config.implementer_model,
             reviewer_model=config.reviewer_model,
             tester_model=config.tester_model,
+            gpu_architect_model=config.gpu_architect_model,
+            gpu_implementer_model=config.gpu_implementer_model,
+            classification_model=config.classification_model or "",
             num_ctx=config.num_ctx,
             num_threads=config.num_threads,
             temperature=config.temperature,
+            use_pipeline=str(config.use_pipeline).lower(),
+            auto_approve=str(config.auto_approve).lower(),
+            debate_enabled=str(config.debate_enabled).lower(),
             debate_rounds=config.debate_rounds,
             rag_top_k=config.rag_top_k,
+            rag_always_query=str(config.rag_always_query).lower(),
+            web_search_enabled=str(config.web_search_enabled).lower(),
+            project_context_enabled=str(config.project_context_enabled).lower(),
         )
         dest.write_text(template, encoding="utf-8")
-        print_success(f"Created: {dest}")
-        console.print(
-            "[dim]Uncomment and edit any settings you want to override for this project.\n"
-            "Restart [bold]ca[/bold] after saving to apply changes.[/dim]"
-        )
+        if silent:
+            print_info(
+                f"Created ca.config with defaults — uncomment any line to override for this project."
+            )
+            self._log.info("ca.config auto-created at %s", dest)
+        else:
+            print_success(f"Created: {dest}")
+            console.print(
+                "[dim]Uncomment and edit any settings you want to override for this project.\n"
+                "Restart [bold]ca[/bold] after saving to apply changes.[/dim]"
+            )
 
 
 # ── Spec mode REPL ───────────────────────────────────────────────────────────

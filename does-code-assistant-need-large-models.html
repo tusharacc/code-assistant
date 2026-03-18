@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Does a Code Assistant Need Large Models?</title>
+  <style>
+    :root {
+      --bg:          #0f1117;
+      --surface:     #1a1d27;
+      --surface2:    #22263a;
+      --border:      #2e3450;
+      --accent:      #6c8ef7;
+      --accent2:     #a78bfa;
+      --green:       #34d399;
+      --yellow:      #fbbf24;
+      --red:         #f87171;
+      --text:        #e2e8f0;
+      --muted:       #94a3b8;
+      --code-bg:     #141720;
+      --radius:      10px;
+      --max-w:       780px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+      font-size: 17px;
+      line-height: 1.75;
+      padding: 2rem 1rem 6rem;
+    }
+
+    .container {
+      max-width: var(--max-w);
+      margin: 0 auto;
+    }
+
+    /* ── Header ── */
+    header {
+      padding: 3rem 0 2rem;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 2.5rem;
+    }
+
+    .tag-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.2rem;
+    }
+
+    .tag {
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 0.25rem 0.75rem;
+      border-radius: 99px;
+      background: var(--surface2);
+      color: var(--accent);
+      border: 1px solid var(--border);
+    }
+
+    h1 {
+      font-size: clamp(1.8rem, 5vw, 2.6rem);
+      font-weight: 800;
+      line-height: 1.2;
+      background: linear-gradient(135deg, #e2e8f0 30%, var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 1rem;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 1.05rem;
+      max-width: 600px;
+      line-height: 1.6;
+    }
+
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 1.5rem;
+      color: var(--muted);
+      font-size: 0.875rem;
+    }
+
+    .meta-dot { color: var(--border); }
+
+    /* ── Typography ── */
+    h2 {
+      font-size: 1.45rem;
+      font-weight: 700;
+      color: #fff;
+      margin: 2.5rem 0 0.9rem;
+      padding-left: 0.8rem;
+      border-left: 3px solid var(--accent);
+    }
+
+    h3 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--accent2);
+      margin: 1.8rem 0 0.6rem;
+    }
+
+    p { margin-bottom: 1.1rem; color: var(--text); }
+
+    a {
+      color: var(--accent);
+      text-decoration: none;
+      border-bottom: 1px solid transparent;
+      transition: border-color 0.2s;
+    }
+    a:hover { border-color: var(--accent); }
+
+    strong { color: #fff; font-weight: 600; }
+
+    /* ── Callout boxes ── */
+    .callout {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      margin: 1.5rem 0;
+      font-size: 0.95rem;
+    }
+    .callout.green  { border-left-color: var(--green);  }
+    .callout.yellow { border-left-color: var(--yellow); }
+    .callout.purple { border-left-color: var(--accent2);}
+
+    .callout-title {
+      font-weight: 700;
+      font-size: 0.8rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 0.4rem;
+      color: var(--accent);
+    }
+    .callout.green  .callout-title { color: var(--green);  }
+    .callout.yellow .callout-title { color: var(--yellow); }
+    .callout.purple .callout-title { color: var(--accent2);}
+
+    /* ── Code ── */
+    code {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.15em 0.45em;
+      font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.84em;
+      color: #c4b5fd;
+    }
+
+    pre {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.2rem 1.4rem;
+      overflow-x: auto;
+      margin: 1.2rem 0;
+      font-family: "JetBrains Mono", "Fira Code", monospace;
+      font-size: 0.83rem;
+      line-height: 1.7;
+      color: #c4b5fd;
+    }
+    pre code { background: none; border: none; padding: 0; color: inherit; }
+
+    /* ── Pipeline diagram ── */
+    .pipeline {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 1.4rem 0;
+      padding: 1rem 1.2rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .phase {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.35rem 0.75rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--accent2);
+      white-space: nowrap;
+    }
+
+    .arrow {
+      color: var(--muted);
+      font-size: 1rem;
+    }
+
+    /* ── Benchmark table ── */
+    .table-wrap {
+      overflow-x: auto;
+      margin: 1.5rem 0;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+
+    thead th {
+      background: var(--surface2);
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.15s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--surface); }
+
+    tbody td {
+      padding: 0.7rem 1rem;
+      color: var(--text);
+      vertical-align: middle;
+    }
+
+    .model-badge {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 0.2rem 0.55rem;
+      border-radius: 99px;
+    }
+    .badge-ca     { background: rgba(108,142,247,0.15); color: var(--accent); }
+    .badge-claude { background: rgba(167,139,250,0.15); color: var(--accent2); }
+
+    .val-good { color: var(--green);  font-weight: 600; }
+    .val-warn { color: var(--yellow); font-weight: 600; }
+    .val-bad  { color: var(--red);    font-weight: 600; }
+    .val-muted{ color: var(--muted); }
+
+    /* ── Architecture cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin: 1.4rem 0;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem 1.2rem;
+      transition: border-color 0.2s;
+    }
+    .card:hover { border-color: var(--accent); }
+
+    .card-icon {
+      font-size: 1.4rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .card-title {
+      font-weight: 700;
+      font-size: 0.92rem;
+      color: #fff;
+      margin-bottom: 0.35rem;
+    }
+
+    .card-body {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.55;
+      margin: 0;
+    }
+
+    /* ── Config layer diagram ── */
+    .config-layers {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      margin: 1.2rem 0;
+    }
+
+    .config-layer {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      padding: 0.6rem 1rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 0.85rem;
+    }
+
+    .layer-num {
+      font-weight: 800;
+      font-size: 0.75rem;
+      width: 1.4rem;
+      height: 1.4rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .layer-1 { background: rgba(108,142,247,0.8);  color: #fff; }
+    .layer-2 { background: rgba(108,142,247,0.6);  color: #fff; }
+    .layer-3 { background: rgba(108,142,247,0.4);  color: #fff; }
+    .layer-4 { background: rgba(108,142,247,0.25); color: #fff; }
+    .layer-5 { background: rgba(108,142,247,0.1);  color: #fff; }
+
+    .layer-label { font-weight: 600; color: var(--text); min-width: 160px; }
+    .layer-desc  { color: var(--muted); font-size: 0.8rem; }
+
+    /* ── Verdict section ── */
+    .verdict {
+      background: linear-gradient(135deg, rgba(108,142,247,0.08), rgba(167,139,250,0.08));
+      border: 1px solid rgba(108,142,247,0.3);
+      border-radius: var(--radius);
+      padding: 1.5rem 1.8rem;
+      margin: 2rem 0;
+    }
+
+    .verdict h3 {
+      color: var(--accent);
+      margin-top: 0;
+      font-size: 1rem;
+    }
+
+    /* ── Divider ── */
+    hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 2.5rem 0;
+    }
+
+    /* ── Hashtags ── */
+    .hashtags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.8rem;
+    }
+
+    .hashtag {
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 500;
+    }
+
+    /* ── Footer ── */
+    footer {
+      margin-top: 4rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .github-links {
+      display: flex;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      margin-top: 0.8rem;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- ══ HEADER ══ -->
+  <header>
+    <div class="tag-row">
+      <span class="tag">AI</span>
+      <span class="tag">Open Source</span>
+      <span class="tag">Developer Tools</span>
+      <span class="tag">Rust</span>
+    </div>
+
+    <h1>Does a Code Assistant Need Large Models?</h1>
+
+    <p class="subtitle">
+      A curious engineer's journey from an OpenAI research paper to building a
+      fully local, multi-agent coding assistant — and benchmarking it against Claude.
+    </p>
+
+    <div class="meta">
+      <span>Tushar Saurabh</span>
+      <span class="meta-dot">·</span>
+      <span>March 2026</span>
+      <span class="meta-dot">·</span>
+      <span>12 min read</span>
+    </div>
+  </header>
+
+
+  <!-- ══ SECTION 1 ══ -->
+  <h2>The Question That Started It All</h2>
+
+  <p>
+    For a long time, I was puzzled by a fundamental question: how can an LLM — which is
+    essentially just predicting the next token — write correct code? Coding is inherently
+    logical. Logic shouldn't emerge from statistical word prediction, or so I thought.
+  </p>
+
+  <p>
+    So I did what any curious engineer would do: I asked GPT and Claude. That conversation
+    led me to a landmark paper —
+    <a href="https://arxiv.org/pdf/2107.03374" target="_blank">
+      <em>Evaluating Large Language Models Trained on Code</em>
+    </a> by OpenAI. One result stood out immediately.
+  </p>
+
+  <div class="callout green">
+    <div class="callout-title">Key Finding — Codex Paper (2021)</div>
+    For a 12-billion parameter model trained on code, the percentage of problems solved
+    increased from <strong>28.8%</strong> with a single sample to <strong>77%</strong>
+    when 100 samples were generated and evaluated against unit tests. The model that
+    knows how to test and what to test, through iteration, converges to correct code.
+  </div>
+
+  <p>
+    This answered the first part of my question: a 12B model trained on code is good
+    enough. But it still did not explain <em>why</em> logic can emerge from token
+    prediction.
+  </p>
+
+  <p>
+    The answer was simpler than I expected. A programming language is just another
+    language — but with far fewer keywords and a strict, unambiguous grammar. Code on
+    GitHub and Stack Overflow always appears with surrounding context: problem statement,
+    comments, variable names, tests. As long as an LLM has learned that mapping, it can
+    generate code that fits the context. Logic is just a very regular sub-language of
+    human writing.
+  </p>
+
+  <p>
+    This realisation led to a second thought: <em>if programming is just another language
+    with fewer words, a smaller and more specialised model should be sufficient.</em>
+  </p>
+
+  <div class="callout yellow">
+    <div class="callout-title">The Practical Motivation</div>
+    I can currently afford Claude, but what if pricing changes? The best tools should
+    remain accessible. I wanted a coding assistant that runs entirely on local hardware —
+    no API keys, no subscription, no data leaving my machine.
+  </div>
+
+
+  <!-- ══ SECTION 2 ══ -->
+  <h2>Building the Local Code Assistant</h2>
+
+  <p>
+    I chose <a href="https://ollama.com" target="_blank">Ollama</a> as the inference
+    backend — it runs quantised models locally with a clean API — and started with the
+    <strong>Qwen 2.5 Coder</strong> family (7B, 14B, and 32B). Rather than a chat
+    interface, I wanted an agent that could actually <em>write files, edit them,
+    and run shell commands</em> — the things that matter for real development work.
+  </p>
+
+  <p>
+    I also believe strongly in specialisation. A single all-knowing model tends to be
+    average at everything. Instead, I defined distinct personas with different
+    instructions, each doing one thing well.
+  </p>
+
+  <h3>Three Execution Modes</h3>
+
+  <p><strong>1. Interactive mode</strong> — a standard REPL where you can ask questions,
+  request edits, and work iteratively. The assistant maintains session history and can
+  be resumed across sessions.</p>
+
+  <p><strong>2. Pipeline mode</strong> — you hand it a requirement document and walk
+  away. The full 7-phase flow runs sequentially:</p>
+
+  <div class="pipeline">
+    <span class="phase">Architect</span>
+    <span class="arrow">→</span>
+    <span class="phase">Implementer</span>
+    <span class="arrow">→</span>
+    <span class="phase">Reviewer</span>
+    <span class="arrow">→</span>
+    <span class="phase">Implementer (fix)</span>
+    <span class="arrow">→</span>
+    <span class="phase">Tester ×3</span>
+    <span class="arrow">→</span>
+    <span class="phase">Docs</span>
+  </div>
+
+  <p><strong>3. Quick mode</strong> — a single, fast, no-tools response for questions
+  like "what does <code>git reflog</code> do?"</p>
+
+  <p>
+    Because only one model needs to be in RAM at a time in pipeline mode, this works on a
+    <strong>32 GB machine</strong> without VRAM. Each phase loads its model, runs, then
+    releases memory before the next phase begins.
+  </p>
+
+
+  <!-- ══ SECTION 3 — ARCHITECTURE ══ -->
+  <h2>Architecture Deep Dive</h2>
+
+  <p>
+    The assistant is built around four interlocking systems: a multi-agent core, a RAG
+    retrieval layer, an AST symbol index, and a layered configuration engine.
+  </p>
+
+  <h3>Multi-Agent Core</h3>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-icon">🏛️</div>
+      <div class="card-title">Architect</div>
+      <p class="card-body">Plans the approach, writes acceptance criteria, and classifies
+      incoming intent (conversational vs implementation vs complex). Stays on a small,
+      fast model — <code>7b</code> — even when the implementer is upgraded.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">⚙️</div>
+      <div class="card-title">Implementer</div>
+      <p class="card-body">Writes and edits code using tool calls: <code>write_file</code>,
+      <code>edit_file</code>, <code>read_file</code>, <code>run_shell</code>. The heaviest
+      persona — benefits most from a larger model (<code>14b</code> or <code>32b</code>).</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔍</div>
+      <div class="card-title">Reviewer</div>
+      <p class="card-body">Reads the generated code and produces structured findings.
+      The implementer then gets one more pass to fix the issues before tests run.</p>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧪</div>
+      <div class="card-title">Tester</div>
+      <p class="card-body">Runs acceptance criteria against the implementation — up to
+      three rounds. Each failure feeds back into the implementer for a targeted fix.
+      Inspired directly by the pass@k insight from the Codex paper.</p>
+    </div>
+  </div>
+
+  <h3>RAG — Retrieval-Augmented Generation</h3>
+
+  <p>
+    Before answering any substantive query, the assistant embeds the question with
+    <code>nomic-embed-text</code> and retrieves the top-K semantically relevant chunks
+    from a local <strong>ChromaDB</strong> vector store. This means the model always has
+    real project context — actual function signatures, file contents, module structure —
+    injected into its prompt, rather than relying on what it learned during training.
+  </p>
+
+  <pre><code>/index src/          # embed your codebase into the RAG index
+/index src-tauri/src # works with any language</code></pre>
+
+  <h3>AST Symbol Index</h3>
+
+  <p>
+    RAG retrieves semantically similar <em>chunks</em> of text, but sometimes you need
+    <em>structural</em> answers: "what functions exist in <code>state.rs</code>?" or
+    "where is <code>TerminalState</code> defined?" For this, the assistant builds a
+    lightweight symbol table using <strong>tree-sitter</strong> — supporting Python,
+    JavaScript, TypeScript, and Rust — stored in a local SQLite database (~1 MB for
+    large codebases).
+  </p>
+
+  <p>
+    At session start, a compact outline is injected into context automatically:
+  </p>
+
+  <pre><code># Symbol Map [Rust: 67 · TypeScript: 5 · Python: 8]
+
+## src-tauri/src/state.rs [Rust]
+pub struct TerminalState :6 · impl TerminalState → [new, update, reset] :13
+
+## src-tauri/src/commands/mod.rs [Rust]
+execute_command(...) :65 · register_commands(...) :12</code></pre>
+
+  <p>
+    The model also has a <code>find_symbols</code> tool it can call mid-session for
+    targeted structural queries — complementing the semantic RAG search.
+  </p>
+
+  <h3>Web Tools</h3>
+
+  <p>
+    Two tools give the model access to live information when local context isn't enough:
+  </p>
+
+  <ul style="margin: 0.5rem 0 1rem 1.5rem; color: var(--text);">
+    <li style="margin-bottom: 0.5rem;">
+      <strong>fetch_url</strong> — fetches and parses any URL using Python's stdlib
+      (<code>urllib</code> + <code>html.parser</code>). No API key, always available.
+      Useful for reading documentation, GitHub issues, or Stack Overflow answers.
+    </li>
+    <li>
+      <strong>web_search</strong> — performs a web search using either
+      <a href="https://serper.dev" target="_blank">Serper API</a> (fast, structured JSON)
+      or <strong>DuckDuckGo</strong> (free, no key required). Toggled by
+      <code>web_search_enabled = true</code> in config. Results are injected as context
+      before the model responds.
+    </li>
+  </ul>
+
+  <h3>Config-Driven Design</h3>
+
+  <p>
+    Everything is driven by a layered configuration system — the same assistant can run on
+    a 16 GB laptop with a 7B model today and a 128 GB workstation with a 70B model
+    tomorrow without changing a line of code.
+  </p>
+
+  <div class="config-layers">
+    <div class="config-layer">
+      <div class="layer-num layer-1">1</div>
+      <div class="layer-label">CLI flags / runtime</div>
+      <div class="layer-desc">Highest priority — overrides everything</div>
+    </div>
+    <div class="config-layer">
+      <div class="layer-num layer-2">2</div>
+      <div class="layer-label"><code>CA_*</code> env vars</div>
+      <div class="layer-desc">e.g. <code>CA_IMPLEMENTER_MODEL=qwen2.5-coder:32b</code></div>
+    </div>
+    <div class="config-layer">
+      <div class="layer-num layer-3">3</div>
+      <div class="layer-label"><code>ca.config</code></div>
+      <div class="layer-desc">Project-level TOML — auto-generated on first launch</div>
+    </div>
+    <div class="config-layer">
+      <div class="layer-num layer-4">4</div>
+      <div class="layer-label"><code>~/.code-assistant/config.toml</code></div>
+      <div class="layer-desc">Machine-level defaults for all projects</div>
+    </div>
+    <div class="config-layer">
+      <div class="layer-num layer-5">5</div>
+      <div class="layer-label">Built-in defaults</div>
+      <div class="layer-desc">Sized conservatively for a 32 GB CPU machine</div>
+    </div>
+  </div>
+
+  <p>
+    Sensitive settings — feedback storage, session directories, API keys — are enforced
+    at machine scope and silently blocked from appearing in per-project config files.
+    You cannot accidentally commit credentials.
+  </p>
+
+
+  <!-- ══ SECTION 4 — BENCHMARKS ══ -->
+  <h2>Testing the Efficacy — Benchmarks</h2>
+
+  <p>
+    Inspired by the pass@k methodology from the Codex paper, I built a benchmark harness
+    that runs both the local code-assistant <em>and</em> the Claude API against identical
+    requirement documents, then compares the results side-by-side.
+  </p>
+
+  <p>
+    Three requirements were tested, ranging in complexity:
+  </p>
+
+  <ul style="margin: 0.5rem 0 1rem 1.5rem; color: var(--text);">
+    <li><strong>req_01</strong> — Python calculator with REPL and expression parsing</li>
+    <li><strong>req_02</strong> — REST API for a todo web application (FastAPI + SQLite)</li>
+    <li><strong>req_03</strong> — Log analyser CLI with multi-format parsing, aggregation, and alerting</li>
+  </ul>
+
+  <h3>Benchmark Results</h3>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Task</th>
+          <th>Runner</th>
+          <th>Model</th>
+          <th>Time (s)</th>
+          <th>API Calls</th>
+          <th>Lines Written</th>
+          <th>Tests Passed</th>
+          <th>Syntax Errors</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Calculator -->
+        <tr>
+          <td><strong>Calculator</strong></td>
+          <td><span class="model-badge badge-ca">code-assistant</span></td>
+          <td class="val-muted">7b + 14b</td>
+          <td>1,790</td>
+          <td class="val-good">21</td>
+          <td class="val-muted">71</td>
+          <td class="val-warn">0</td>
+          <td class="val-warn">1</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><span class="model-badge badge-claude">Claude API</span></td>
+          <td class="val-muted">claude-sonnet-4-6</td>
+          <td class="val-good">1,137</td>
+          <td>24</td>
+          <td class="val-good">2,235</td>
+          <td class="val-good">218</td>
+          <td class="val-good">0</td>
+        </tr>
+        <!-- Todo Webapp -->
+        <tr style="border-top: 1px solid var(--border);">
+          <td><strong>Todo API</strong></td>
+          <td><span class="model-badge badge-ca">code-assistant</span></td>
+          <td class="val-muted">7b + 14b</td>
+          <td>2,163</td>
+          <td class="val-good">23</td>
+          <td class="val-muted">117</td>
+          <td class="val-warn">0</td>
+          <td class="val-good">0</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><span class="model-badge badge-claude">Claude API</span></td>
+          <td class="val-muted">claude-sonnet-4-6</td>
+          <td>2,310</td>
+          <td>41</td>
+          <td class="val-good">2,803</td>
+          <td class="val-good">4</td>
+          <td class="val-good">0</td>
+        </tr>
+        <!-- Log Analyser -->
+        <tr style="border-top: 1px solid var(--border);">
+          <td><strong>Log Analyser</strong></td>
+          <td><span class="model-badge badge-ca">code-assistant</span></td>
+          <td class="val-muted">7b + 14b</td>
+          <td class="val-good">1,362</td>
+          <td class="val-good">17</td>
+          <td class="val-muted">166</td>
+          <td class="val-warn">0</td>
+          <td class="val-good">0</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><span class="model-badge badge-claude">Claude API</span></td>
+          <td class="val-muted">claude-sonnet-4-6</td>
+          <td class="val-bad">5,771</td>
+          <td class="val-bad">55</td>
+          <td class="val-good">5,851</td>
+          <td class="val-good">329</td>
+          <td class="val-good">0</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout purple">
+    <div class="callout-title">Reading the Numbers</div>
+    The local models (7b + 14b) consistently used <strong>fewer API calls</strong> and
+    finished faster on simpler tasks — but produced significantly less code and no passing
+    tests. The Claude API produced comprehensive implementations with full test suites,
+    but at the cost of 6–14× more tokens and much longer runtimes on complex tasks.
+    Crucially: the local assistant has <strong>zero per-token cost</strong> and runs
+    entirely offline.
+  </div>
+
+  <p>
+    The test-passing gap narrows considerably when the 32B model is used — larger models
+    follow tool-use instructions far more reliably and write tests that actually compile
+    and run. The architecture is already in place; it just needs a smarter model behind it.
+  </p>
+
+
+  <!-- ══ SECTION 5 — INTELLIGENT TERMINAL ══ -->
+  <h2>Testing on a Real Project — Intelligent Terminal</h2>
+
+  <p>
+    Portability is a long-standing pain point in software development. The Unix terminal
+    is rich and powerful; Windows Command Prompt falls short; PowerShell changed the
+    entire command structure. Git Bash and MinGW work but are heavy installs for what
+    is essentially a compatibility shim.
+  </p>
+
+  <p>
+    So I started building something I call <strong>Intelligent Terminal</strong> — a
+    cross-platform terminal where every command is implemented from scratch in Rust,
+    giving identical behaviour on macOS, Linux, and Windows. Eventually it will connect
+    to a local LLM so you can say "list all hidden directories by size and filter those
+    matching a pattern" and it just works.
+  </p>
+
+  <p>
+    This project became the real test bed for code-assistant.
+  </p>
+
+  <h3>First Test — Validating Existing Commands</h3>
+
+  <p>
+    I asked the assistant to write a Python script that would execute every implemented
+    command with its <code>--help</code> flag, capture the output, and compare it against
+    the requirement document.
+  </p>
+
+  <p>
+    It produced the script correctly. When I ran it from the root directory, it failed
+    with a "file not found" error — the instruction pointed at the wrong working
+    directory. Once I navigated to the correct path and re-ran, the output matched
+    the requirements exactly. The logic was correct; the working directory assumption
+    was not. A lesson noted.
+  </p>
+
+  <h3>Second Test — Implementing <code>nslookup</code></h3>
+
+  <p>
+    The real challenge was asking the assistant to implement the <code>nslookup</code>
+    command in Rust — a moderately complex task with multiple flags, option parsing,
+    and DNS query logic.
+  </p>
+
+  <p>
+    <strong>Run 1:</strong> The 14B model printed the Rust code as a markdown block
+    without calling a single file-writing tool. Nothing was written to disk.
+    This was a known limitation of smaller models — they "explain" instead of "act."
+  </p>
+
+  <p>
+    <strong>Run 2:</strong> After fixing the flag parsing bug (the <code>--req-file</code>
+    flag was passed with a single dash, causing the CLI parser to read it as
+    <code>-r eq-file</code> — a session resume attempt rather than a file load), the 14B
+    model was upgraded to 32B. The 32B model correctly used tool calls, wrote the file,
+    and ran <code>cargo build</code>.
+  </p>
+
+  <p>
+    <strong>Run 3:</strong> The build failed. The model had generated <code>clap</code>
+    argument parser code with duplicate short flags: <code>-d</code> was used for both
+    <code>debug</code> and <code>ndots</code>; <code>-r</code> for both
+    <code>recurse</code> and <code>retry</code>. Clap rejects this at runtime.
+    The shell output was truncated by the tool, so the model never saw the actual
+    compiler error and eventually lost track of the filename — attempting to edit a
+    file called <code>ns.rs</code> that did not exist.
+  </p>
+
+  <p>
+    I switched to interactive mode, manually resolved the build errors, and also fixed
+    two Rust-specific issues that the model had not caught:
+  </p>
+
+  <pre><code>// Model wrote:
+let matches = Command::new("nslookup").get_matches_from(args);
+
+// Correct (won't panic on bad args):
+let matches = match Command::new("nslookup").try_get_matches_from(args) {
+    Ok(m) => m,
+    Err(e) => return Err(e.to_string()),
+};</code></pre>
+
+  <div class="verdict">
+    <h3>Honest Assessment</h3>
+    <p>
+      The assistant reduced my coding effort by roughly <strong>70%</strong>. The
+      remaining 30% was troubleshooting — reading compiler errors, fixing edge cases,
+      and correcting the occasional hallucinated filename. For someone comfortable reading
+      Rust, that trade-off is extremely worthwhile. The architecture and boilerplate were
+      generated correctly; only the fine-grained logic needed human intervention.
+    </p>
+    <p style="margin-bottom:0;">
+      Ironically, this tool was built using Claude. I am using Claude to create a tool
+      that can eventually replace Claude for me — which reminds me of a tweet where
+      someone said "it's time to replace GitHub" and GitHub replied asking them to share
+      the GitHub link.
+    </p>
+  </div>
+
+
+  <!-- ══ SECTION 6 — LESSONS ══ -->
+  <h2>Lessons Learned</h2>
+
+  <p><strong>Model size matters for tool use.</strong> The 7B and 14B models often
+  describe what to do in markdown rather than calling the appropriate tool. The 32B model
+  reliably uses tools. This aligns with the pass@k finding: bigger models are not just
+  smarter, they are more disciplined at following structured instructions.</p>
+
+  <p><strong>Truncated tool output breaks the feedback loop.</strong> If a compiler error
+  is cut off, the model cannot fix the bug it cannot see. The tool must surface the
+  <em>end</em> of the output (where errors appear), not the beginning.</p>
+
+  <p><strong>Specialised agents outperform a generalist.</strong> Separating Architect,
+  Implementer, Reviewer, and Tester into distinct personas with different system prompts
+  produces noticeably better output than asking a single agent to do everything. Each
+  persona has a focused objective and fewer distractions.</p>
+
+  <p><strong>Infrastructure beats intelligence, sometimes.</strong> RAG, AST indexing,
+  layered config, and per-project memory dramatically improve the quality of local model
+  output — not by making the model smarter, but by giving it better context. A 14B model
+  with good context often outperforms a 32B model working blind.</p>
+
+  <hr />
+
+  <!-- ══ LINKS ══ -->
+  <h2>Try It</h2>
+
+  <p>Both projects are open source. The code-assistant is built to be forked and
+  configured for your own hardware and preferred models.</p>
+
+  <div class="github-links">
+    <a href="https://github.com/tusharacc/code-assistant" target="_blank">
+      ⭐ code-assistant on GitHub
+    </a>
+    <a href="https://github.com/tusharacc/intelligent_terminal" target="_blank">
+      ⭐ intelligent_terminal on GitHub
+    </a>
+  </div>
+
+  <!-- ══ FOOTER ══ -->
+  <footer>
+    <p>Written by Tushar Saurabh · Corrected and embellished by Claude · March 2026</p>
+    <p style="margin-top: 0.4rem; color: var(--muted);">
+      Built with curiosity, Ollama, Rust, and a healthy distrust of API bills.
+    </p>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -60,8 +60,14 @@ def print_tool_result(name: str, result: str, error: bool = False) -> None:
     is_error = error or result.lower().startswith(_ERROR_PREFIXES)
     style = "red" if is_error else "tool.result"
     icon = "✗" if is_error else "✓"
+    # Show up to 800 chars. For long output (e.g. cargo build errors), prefer the
+    # tail — errors appear at the end, not the beginning.
+    if len(result) > 800:
+        preview = "…" + result[-780:]
+    else:
+        preview = result
     console.print(
-        f"[{style}]{icon} {name}:[/{style}] [dim]{result[:300]}{'…' if len(result) > 300 else ''}[/dim]"
+        f"[{style}]{icon} {name}:[/{style}] [dim]{preview}[/dim]"
     )
 
 
