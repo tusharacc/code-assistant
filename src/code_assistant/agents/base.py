@@ -263,7 +263,10 @@ class Agent:
                 delta = msg.content or ""
                 if delta:
                     text_accumulator += delta
-                    if not silent:
+                    # Stream token-by-token only for agents without tools (quick/conversational).
+                    # Tool-using agents buffer the full response so we can detect code dumps
+                    # and suppress them from the console (showing a headline instead).
+                    if not silent and not self.use_tools:
                         stream_token(delta)
 
                 # Tool calls appear in the final chunk
@@ -276,8 +279,26 @@ class Agent:
                             }
                         })
 
-            if not silent and text_accumulator:
-                console.print()  # newline after streamed content
+            if not silent:
+                if not self.use_tools and text_accumulator:
+                    console.print()  # newline after streamed content
+                elif text_accumulator:
+                    # Tool-using agent: decide whether to print full text or a headline.
+                    # Large code-fence responses (>= 2000 chars) are suppressed on console
+                    # — the full content is logged at DEBUG for troubleshooting.
+                    _CODE_DUMP_THRESHOLD = 2000
+                    if len(text_accumulator) >= _CODE_DUMP_THRESHOLD and "```" in text_accumulator:
+                        console.print(
+                            f"[dim]⋯ Received code response "
+                            f"({len(text_accumulator):,} chars) — executing...[/dim]"
+                        )
+                        log.debug(
+                            "Full model response suppressed from console | role=%s chars=%d\n%s",
+                            self.role_label, len(text_accumulator), text_accumulator,
+                        )
+                    else:
+                        console.print(text_accumulator, markup=False, highlight=False)
+                        console.print()
 
             # Capture token counts from the final chunk (Ollama only populates these there)
             if last_chunk is not None:
