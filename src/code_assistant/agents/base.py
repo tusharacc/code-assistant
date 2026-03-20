@@ -169,23 +169,45 @@ class Agent:
 
             if not tool_calls_raw:
                 # Recovery: model dumped code as markdown instead of calling tools.
-                # Detect by looking for code fences in a tools-enabled agent on round 0.
-                if round_num == 0 and self.use_tools and "```" in text:
+                # Fire on ANY round (not just round 0) — a model can write 1-2 stub
+                # files then dump the rest as markdown on a later round.
+                # Limit to one recovery per session via _markdown_recovery_fired flag.
+                if (
+                    self.use_tools
+                    and "```" in text
+                    and not getattr(self, "_markdown_recovery_fired", False)
+                ):
+                    self._markdown_recovery_fired = True  # type: ignore[attr-defined]
+                    # Extract file paths mentioned in the markdown so the recovery
+                    # message can enumerate exactly what still needs to be written.
+                    _path_re = re.compile(
+                        r"(?m)^(?:#{1,4}\s+|>\s*\*\*)?([a-zA-Z0-9_\-./]+\.[a-z]{1,6})\b"
+                    )
+                    mentioned = list(dict.fromkeys(  # deduplicate, preserve order
+                        m.group(1) for m in _path_re.finditer(text)
+                        if "/" in m.group(1) or "." in m.group(1).rsplit("/", 1)[-1]
+                    ))[:20]  # cap at 20 files
+                    file_list = (
+                        "\n".join(f"  - {p}" for p in mentioned)
+                        if mentioned else "  (see your previous response for the full list)"
+                    )
                     log.warning(
                         "Tool-use failure: model output markdown code with no tool calls "
-                        "— injecting recovery prompt | role=%s chars=%d",
-                        self.role_label, len(text),
+                        "— injecting recovery prompt | role=%s round=%d chars=%d files_found=%d",
+                        self.role_label, round_num, len(text), len(mentioned),
                     )
                     raw.append({
                         "role": "user",
                         "content": (
-                            "Your response contained code in markdown format. "
-                            "That code does NOT exist on disk — the task has NOT been completed. "
-                            "You MUST call write_file or edit_file for every file. "
-                            "Start NOW by calling write_file for the first file. Do not explain."
+                            "STOP. Your response contained code in markdown — "
+                            "that code does NOT exist on disk and the task is NOT complete.\n\n"
+                            "You MUST call write_file or edit_file for EVERY file. "
+                            f"Files still needed:\n{file_list}\n\n"
+                            "Call write_file for the first file RIGHT NOW with its complete content. "
+                            "Do not summarise or explain — just call the tool."
                         ),
                     })
-                    continue  # retry once with the correction
+                    continue  # retry with the targeted correction
                 log.debug("No tool calls — agentic loop complete | role=%s", self.role_label)
                 break  # No tool calls — we're done
 
