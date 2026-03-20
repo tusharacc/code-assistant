@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 from ..config import config
 from ..logger import get_logger
-from ..ui.console import console, print_rule, print_info, print_warning
+from ..ui.console import console, print_rule, print_info, print_warning, print_error
 from .base import Agent, Message
 from .architect import make_architect
 from .implementer import make_implementer
@@ -169,6 +169,29 @@ class Pipeline:
         all_messages.extend(self._phase_implementer(user_task, state, arch, impl))
         self.metrics["implementer"] = _phase_metrics(impl, before_impl, time.perf_counter() - t)
         self.metrics["implementer_qa_arch"] = _phase_metrics(arch, before_arch, 0)
+
+        # ── Gate: verify implementer actually wrote files ────────────────
+        # Count write_file + edit_file tool calls in impl_history.
+        # If none, the implementer produced only markdown — halt before
+        # the reviewer hallucinates a review of non-existent code.
+        _written = [
+            tc.get("function", {}).get("arguments", {}).get("path", "?")
+            for msg in state.impl_history
+            for tc in msg.tool_calls
+            if tc.get("function", {}).get("name") in ("write_file", "edit_file")
+        ]
+        if not _written:
+            print_error(
+                "Pipeline halted: implementer wrote no files to disk. "
+                "Review and test phases require actual code — nothing to review."
+            )
+            log.error(
+                "Pipeline halted after phase 2: zero write_file/edit_file tool calls "
+                "in impl_history — review skipped"
+            )
+            return all_messages
+
+        log.info("Gate passed: implementer wrote %d file(s): %s", len(_written), _written)
 
         # ── Phase 3: Reviewer ────────────────────────────────────────────
         print_rule("pipeline · phase 3 · reviewer", style="dim yellow")
