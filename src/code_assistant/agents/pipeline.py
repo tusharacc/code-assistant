@@ -516,11 +516,40 @@ class Pipeline:
 
         test_text, new_msgs = tester.run(state.test_history, rag_context=self.rag_context)
         state.test_history.extend(new_msgs)
-        state.test_results = test_text
 
+        # Verify the tester actually ran shell commands — not just produced a table
+        # from imagination. If no run_shell calls appear in the new messages,
+        # the tester hallucinated its results. Inject a recovery and retry once.
+        _shell_calls = [
+            tc for msg in new_msgs
+            for tc in msg.tool_calls
+            if tc.get("function", {}).get("name") == "run_shell"
+        ]
+        if not _shell_calls:
+            log.warning(
+                "Tester produced no run_shell calls — results are hallucinated. "
+                "Injecting recovery | round=%d", round_num
+            )
+            recovery = Message(
+                role="user",
+                content=(
+                    "You reported test results without running any shell commands. "
+                    "Those results are not valid — you must call run_shell to actually "
+                    "execute the code before reporting any outcome.\n\n"
+                    "Start NOW: call run_shell to discover the project layout (ls -R), "
+                    "then run the import check, then verify each acceptance criterion. "
+                    "Do not report PASS or FAIL without command output as evidence."
+                ),
+            )
+            state.test_history.append(recovery)
+            test_text, retry_msgs = tester.run(state.test_history, rag_context=self.rag_context)
+            state.test_history.extend(retry_msgs)
+            new_msgs = new_msgs + [recovery] + retry_msgs
+
+        state.test_results = test_text
         log.info(
-            "Tester round %d complete | results_chars=%d",
-            round_num + 1, len(test_text),
+            "Tester round %d complete | shell_calls=%d results_chars=%d",
+            round_num + 1, len(_shell_calls), len(test_text),
         )
         return new_msgs
 
