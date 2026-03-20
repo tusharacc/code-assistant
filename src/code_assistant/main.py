@@ -227,6 +227,12 @@ class REPL:
         if initial_input:
             self._log.info("Auto-triggering initial input | input_chars=%d", len(initial_input))
             self._handle_input(initial_input)
+            # Pipeline mode is non-interactive: exit after the run completes
+            # (whether it succeeded, halted on verifier failure, or hit an error).
+            # The user gets the terminal back with a clear final status line.
+            if self.pipeline_enabled:
+                console.print("\n[dim]Pipeline run finished — returning control to terminal.[/dim]")
+                return
 
         while True:
             try:
