@@ -168,6 +168,24 @@ class Agent:
             ))
 
             if not tool_calls_raw:
+                # Recovery: model dumped code as markdown instead of calling tools.
+                # Detect by looking for code fences in a tools-enabled agent on round 0.
+                if round_num == 0 and self.use_tools and "```" in text:
+                    log.warning(
+                        "Tool-use failure: model output markdown code with no tool calls "
+                        "— injecting recovery prompt | role=%s chars=%d",
+                        self.role_label, len(text),
+                    )
+                    raw.append({
+                        "role": "user",
+                        "content": (
+                            "Your response contained code in markdown format. "
+                            "That code does NOT exist on disk — the task has NOT been completed. "
+                            "You MUST call write_file or edit_file for every file. "
+                            "Start NOW by calling write_file for the first file. Do not explain."
+                        ),
+                    })
+                    continue  # retry once with the correction
                 log.debug("No tool calls — agentic loop complete | role=%s", self.role_label)
                 break  # No tool calls — we're done
 

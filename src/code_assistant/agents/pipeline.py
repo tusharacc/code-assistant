@@ -333,7 +333,9 @@ class Pipeline:
         initial_prompt = (
             f"The architect has proposed this plan:\n\n{state.arch_plan}\n\n"
             f"Original task: {user_task}\n\n"
-            "Now implement it completely. Use your tools to create and modify files. "
+            "Now implement it completely. "
+            "Your FIRST action MUST be a write_file or edit_file tool call — "
+            "do not write any explanatory text before your first tool call. "
             "Write production-ready code — no stubs or placeholders."
         )
         state.impl_history.append(Message(role="user", content=initial_prompt))
