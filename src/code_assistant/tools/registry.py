@@ -146,6 +146,28 @@ def get_tool_schemas() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "compute_file_sha256",
+                "description": (
+                    "Compute the SHA-256 hash of a file you just wrote or edited. "
+                    "Call this after every write_file or edit_file to obtain the hash "
+                    "you will include in your ## Handoff section. "
+                    "Returns: 'sha256:<64-hex-chars>' or an Error string."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file (same path you used in write_file/edit_file).",
+                        }
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "search_codebase",
                 "description": (
                     "Search the project's RAG index for code relevant to a query. "

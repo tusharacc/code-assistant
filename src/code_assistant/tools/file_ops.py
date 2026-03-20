@@ -176,6 +176,30 @@ def _walk_tree(
             _walk_tree(entry, lines, prefix + extension, depth + 1, max_depth)
 
 
+def compute_file_sha256(path: str) -> str:
+    """Compute and return the SHA-256 hash of a file on disk.
+
+    Agents call this after writing a file to obtain the hash they will include
+    in their ## Handoff section.  The verifier independently recomputes the
+    hash and compares — a mismatch means the file was not written correctly.
+    """
+    import hashlib
+    log.debug("compute_file_sha256 | path=%s", path)
+    try:
+        p = Path(path).expanduser().resolve()
+        if not p.exists():
+            return f"Error: file not found: {path}"
+        if not p.is_file():
+            return f"Error: not a file: {path}"
+        digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        log.debug("compute_file_sha256 | %s → %s", path, digest[:12])
+        return f"sha256:{digest}"
+    except PermissionError:
+        return f"Error: permission denied: {path}"
+    except Exception as e:
+        return f"Error computing sha256 for {path}: {e}"
+
+
 def glob_files(pattern: str, root: str = ".") -> str:
     """Find files matching a glob pattern under root."""
     log.debug("glob_files | pattern=%s root=%s", pattern, root)
@@ -193,9 +217,10 @@ def glob_files(pattern: str, root: str = ".") -> str:
 
 # Dispatch table — used by the tool executor
 TOOL_HANDLERS: dict[str, Any] = {
-    "read_file":  read_file,
-    "write_file": write_file,
-    "edit_file":  edit_file,
-    "list_dir":   list_dir,
-    "glob_files": glob_files,
+    "read_file":           read_file,
+    "write_file":          write_file,
+    "edit_file":           edit_file,
+    "list_dir":            list_dir,
+    "glob_files":          glob_files,
+    "compute_file_sha256": compute_file_sha256,
 }
