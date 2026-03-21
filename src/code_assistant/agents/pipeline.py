@@ -1202,7 +1202,13 @@ class Pipeline:
             "6. **Plugin / extension API** — register_operation example\n"
             "7. **Running the tests** — exact pytest command from project root\n"
             "8. **Acceptance criteria status** — Markdown table of each criterion "
-            "and its PASS/FAIL result from the tester\n"
+            "and its PASS/FAIL result from the tester\n\n"
+            "## IMPORTANT — you MUST use write_file to create README.md\n"
+            "Do NOT output the README as markdown text. Call write_file with the complete content.\n"
+            "Required format:\n"
+            '  {"name": "write_file", "arguments": {"path": "' + (readme_path) + '", "content": "..."}}\n'
+            "Writing the file as plain text or in a code fence does nothing — "
+            "only a write_file tool call creates the file on disk."
         )
         state.docs_history.append(Message(role="user", content=prompt))
 

@@ -404,8 +404,8 @@ class Agent:
                     _CODE_DUMP_THRESHOLD = 2000
                     if len(text_accumulator) >= _CODE_DUMP_THRESHOLD and "```" in text_accumulator:
                         console.print(
-                            f"[dim]⋯ Received code response "
-                            f"({len(text_accumulator):,} chars) — executing...[/dim]"
+                            f"[dim]⋯ Received long response "
+                            f"({len(text_accumulator):,} chars) — checking for tool calls...[/dim]"
                         )
                         log.debug(
                             "Full model response suppressed from console | role=%s chars=%d\n%s",
