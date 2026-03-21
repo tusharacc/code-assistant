@@ -432,6 +432,9 @@ class Pipeline:
             print_info("↷ Phase 2 (implementer) — skipped (files already on disk)")
             log.info("Resume: skipping phase 2")
 
+        # Re-index AST + refresh RAG so reviewer sees the files just written.
+        self._reindex_and_refresh(user_task, state)
+
         # ── Phase 3: Reviewer ────────────────────────────────────────────
         if resume_from <= 3:
             print_rule("pipeline · phase 3 · reviewer", style="dim yellow")
@@ -566,6 +569,11 @@ class Pipeline:
         else:
             print_info("↷ Phase 4 (implementer fix) — skipped (loaded from previous run)")
             log.info("Resume: skipping phase 4")
+
+        # Re-index AST + refresh RAG so tester sees any files fixed in phase 4.
+        # Reset test_history so the fresh AST outline is injected cleanly.
+        state.test_history = []
+        self._reindex_and_refresh(user_task, state)
 
         # ── Phase 5: Gather run info from implementer & architect ────────
         if resume_from <= 5:
@@ -784,6 +792,71 @@ class Pipeline:
 
         log.info("Phase 1 (architect) complete | plan_chars=%d", len(arch_text))
         return new_msgs
+
+    def _reindex_and_refresh(self, user_task: str, state: PipelineState) -> None:
+        """Re-index AST and RAG after a write phase so reviewers/testers see current files.
+
+        Called after Phase 2 (implementer) and Phase 4 (fix) to ensure the reviewer
+        and tester work with an up-to-date view of the codebase, not the pre-write snapshot.
+
+        Updates:
+          - self.rag_context    — re-queried with user_task; all subsequent agent.run() calls
+                                  automatically get fresh retrieval context.
+          - state.review_history — prepends AST outline if history is still empty.
+          - state.test_history   — same.
+        All errors are non-fatal — a failed re-index just means stale context, not a crash.
+        """
+        from pathlib import Path as _Path
+        cwd = _Path.cwd()
+        ast_outline = ""
+
+        # 1. Re-index AST (SQLite — typically <1 s even for large codebases)
+        try:
+            from ..rag.ast_indexer import ASTIndexer
+            from ..rag.ast_retriever import ASTRetriever
+            _count = ASTIndexer().index_directory(cwd)
+            _ast_r = ASTRetriever()
+            if _ast_r.is_ready():
+                ast_outline = _ast_r.get_outline() or ""
+            log.info("Post-write AST re-index | symbols=%d outline_chars=%d", _count, len(ast_outline))
+        except Exception as _e:
+            log.warning("Post-write AST re-index failed (non-fatal): %s", _e)
+
+        # 2. Re-query RAG (only if already indexed — no indexing is done here)
+        try:
+            from ..rag.retriever import CodebaseRetriever
+            _r = CodebaseRetriever()
+            if _r.is_ready():
+                fresh = _r.query(user_task)
+                if fresh:
+                    self.rag_context = fresh
+                    log.info("Post-write RAG context refreshed | chars=%d", len(fresh))
+        except Exception as _e:
+            log.warning("Post-write RAG refresh failed (non-fatal): %s", _e)
+
+        # 3. Inject AST outline into upcoming phase histories (only if still empty)
+        if ast_outline:
+            _ast_ctx = [
+                Message(
+                    role="user",
+                    content=(
+                        "[Updated symbol map — reflects files written by implementer]\n\n"
+                        + ast_outline
+                    ),
+                ),
+                Message(
+                    role="assistant",
+                    content="Understood. I have the updated symbol map.",
+                ),
+            ]
+            if not state.review_history:
+                state.review_history = list(_ast_ctx)
+            if not state.test_history:
+                state.test_history = list(_ast_ctx)
+
+        rag_status = f"{len(self.rag_context):,} chars" if self.rag_context else "not indexed"
+        ast_status = f"{len(ast_outline):,} chars" if ast_outline else "not indexed"
+        print_info(f"Context refreshed — AST: {ast_status} · RAG: {rag_status}")
 
     def _phase_implementer(
         self, user_task: str, state: PipelineState, arch: Agent, impl: Agent
