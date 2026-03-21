@@ -193,28 +193,11 @@ def verify_phase(phase_name: str, messages: list["Message"]) -> VerificationResu
             "verify_phase | phase=%s source=tool_calls (no handoff block found)",
             phase_name,
         )
-        seen: set[str] = set()
-
-        # Build a map: path → sha from compute_file_sha256 tool results
-        sha_from_tool: dict[str, str] = {}
-        for i, msg in enumerate(messages):
-            for tc in msg.tool_calls:
-                fn = tc.get("function", {})
-                if fn.get("name") != "compute_file_sha256":
-                    continue
-                args = fn.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except Exception:
-                        continue
-                path_str = args.get("path", "").strip()
-                # The tool result is in the next tool-role message
-                if path_str and i + 1 < len(messages):
-                    result_msg = messages[i + 1]
-                    if result_msg.role == "tool" and result_msg.content.startswith("sha256:"):
-                        sha_from_tool[path_str] = result_msg.content[7:]  # strip "sha256:"
-
+        # Collect the LAST write_file / edit_file for each path.
+        # The model may overwrite the same file multiple times across rounds
+        # (e.g. initial write → Q&A → corrective rewrite).  Only the final
+        # write represents the intended on-disk state.
+        last_write: dict[str, tuple[str, dict]] = {}   # path → (op_name, args)
         for msg in messages:
             for tc in msg.tool_calls:
                 fn = tc.get("function", {})
@@ -228,19 +211,54 @@ def verify_phase(phase_name: str, messages: list["Message"]) -> VerificationResu
                     except Exception:
                         continue
                 path_str = args.get("path", "").strip()
-                if not path_str or path_str in seen:
-                    continue
-                seen.add(path_str)
+                if path_str:
+                    last_write[path_str] = (op_name, args)
 
+        # Build a map: path → LAST sha256 from compute_file_sha256 tool results.
+        # Used only for edit_file operations where we don't have the full content.
+        # For write_file we always derive sha_claimed from the write content itself
+        # so that a stale mid-stream compute_file_sha256 call never causes a false
+        # positive when the model overwrote the file in a later round.
+        sha_from_tool: dict[str, str] = {}
+        for i, msg in enumerate(messages):
+            for j, tc in enumerate(msg.tool_calls):
+                fn = tc.get("function", {})
+                if fn.get("name") != "compute_file_sha256":
+                    continue
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        continue
+                path_str = args.get("path", "").strip()
+                if not path_str:
+                    continue
+                # Tool results follow in order: one tool-role message per call
+                # in the same assistant message.  The result for call j is at
+                # messages[i + 1 + j] (first call → i+1, second call → i+2, …).
+                result_idx = i + 1 + j
+                if result_idx < len(messages):
+                    result_msg = messages[result_idx]
+                    if result_msg.role == "tool" and result_msg.content.startswith("sha256:"):
+                        # Overwrite with the latest SHA — last call wins
+                        sha_from_tool[path_str] = result_msg.content[7:]
+
+        for path_str, (op_name, args) in last_write.items():
                 p = Path(path_str).expanduser().resolve()
                 exists = p.exists() and p.is_file()
                 sha_actual = _sha256_file(p) if exists else None
 
                 if op_name == "write_file":
+                    # Always derive claimed SHA from the write content — this
+                    # reflects the final intended state regardless of when (or
+                    # whether) compute_file_sha256 was called.
                     content = args.get("content", "")
-                    sha_claimed = sha_from_tool.get(path_str) or _sha256_str(content)
+                    sha_claimed = _sha256_str(content)
                 else:
-                    sha_claimed = sha_from_tool.get(path_str)  # None if not computed
+                    # edit_file: we don't have the full final content, so fall
+                    # back to the compute_file_sha256 result if available.
+                    sha_claimed = sha_from_tool.get(path_str)
 
                 record = FileRecord(
                     path=path_str,
