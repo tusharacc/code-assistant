@@ -503,6 +503,105 @@ def _try_parse_text_tool_calls(text: str) -> list[dict]:
             "Fallback parser extracted %d tool call(s) from %d candidate(s)",
             len(result), len(candidates),
         )
+        return result
+
+    # Second fallback: key=value format emitted by some Ollama variants
+    #   write_file path=foo.py content='import sys\n...'
+    kv_result = _try_parse_kv_tool_calls(text)
+    if kv_result:
+        log.debug("KV fallback parser extracted %d tool call(s)", len(kv_result))
+    return kv_result
+
+
+def _decode_kv_escapes(s: str) -> str:
+    """Decode common escape sequences from a raw key=value string value."""
+    return (
+        s.replace("\\n", "\n")
+         .replace("\\t", "\t")
+         .replace("\\r", "\r")
+         .replace('\\"', '"')
+         .replace("\\'", "'")
+         .replace("\\\\", "\\")
+    )
+
+
+def _try_parse_kv_tool_calls(text: str) -> list[dict]:
+    """
+    Parse tool calls emitted in plaintext key=value format:
+
+        write_file path=src/foo.py content='import sys\\n...'
+        edit_file path=x.py old_string='foo' new_string='bar'
+        run_shell command='cargo build'
+
+    Values may be single-quoted, double-quoted, or unquoted.
+    Quoted values support backslash escape sequences (\\n, \\t, etc.).
+    Returns a list of tool-call dicts in standard format, or [].
+    """
+    result: list[dict] = []
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # First token must be a known tool name
+        first_space = line.find(" ")
+        if first_space == -1:
+            continue
+        tool_name = line[:first_space]
+        if tool_name not in _KNOWN_TOOLS:
+            continue
+
+        args: dict = {}
+        rest = line[first_space:].lstrip()
+        i = 0
+
+        while i < len(rest):
+            # Skip whitespace between key=value pairs
+            while i < len(rest) and rest[i].isspace():
+                i += 1
+            if i >= len(rest):
+                break
+
+            # Read key (up to '=')
+            eq = rest.find("=", i)
+            if eq == -1:
+                break
+            key = rest[i:eq].strip()
+            i = eq + 1
+
+            # Read value — quoted or bare
+            if i < len(rest) and rest[i] in ("'", '"'):
+                quote = rest[i]
+                i += 1
+                buf: list[str] = []
+                while i < len(rest):
+                    ch = rest[i]
+                    if ch == "\\" and i + 1 < len(rest):
+                        buf.append(ch)
+                        buf.append(rest[i + 1])
+                        i += 2
+                    elif ch == quote:
+                        i += 1
+                        break
+                    else:
+                        buf.append(ch)
+                        i += 1
+                value = _decode_kv_escapes("".join(buf))
+            else:
+                # Bare value — read until next whitespace
+                end = i
+                while end < len(rest) and not rest[end].isspace():
+                    end += 1
+                value = rest[i:end]
+                i = end
+
+            if key:
+                args[key] = value
+
+        if args:
+            result.append({"function": {"name": tool_name, "arguments": args}})
+
     return result
 
 
