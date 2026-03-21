@@ -338,12 +338,17 @@ def verify_artifact(
 def print_verification(result: VerificationResult) -> None:
     """Print a compact per-file verification table to the console."""
     src = "handoff" if result.handoff_parsed else "tool-calls"
+    status = "[bold green]PASS[/bold green]" if result.passed else "[bold red]FAIL[/bold red]"
     console.print(
-        f"\n[dim]── verification · {result.phase} · source={src} ──[/dim]"
+        f"\n[dim]── verification · {result.phase} · source={src}[/dim] · {status}"
     )
+
     if not result.records:
+        # Zero writes is always a hard failure — agent did nothing
         console.print(
-            f"  [yellow]⚠ no file claims found — agent produced no writes[/yellow]"
+            "  [bold red]✗ FAIL — agent wrote zero files.[/bold red]\n"
+            "  [red]No write_file or edit_file calls found in phase history.\n"
+            "  Review and test phases cannot proceed without code on disk.[/red]"
         )
         console.print()
         return
@@ -356,7 +361,7 @@ def print_verification(result: VerificationResult) -> None:
                 f"  {match_tag}  {r.path}  [dim]{sha_disp}[/dim]"
             )
         elif not r.exists:
-            console.print(f"  [bold red]✗ MISSING [/bold red] {r.path}")
+            console.print(f"  [bold red]✗ MISSING[/bold red]  {r.path}")
         elif r.sha_claimed and r.sha_actual and r.sha_claimed != r.sha_actual:
             console.print(
                 f"  [bold red]✗ SHA MISMATCH[/bold red]  {r.path}\n"
