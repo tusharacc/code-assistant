@@ -74,6 +74,19 @@ _FAIL_ROW = re.compile(r"\|\s*(.+?)\s*\|\s*FAIL\s*\|\s*(.+?)\s*\|", re.IGNORECAS
 # Max rounds of tester → implementer-fix → re-test
 _MAX_TEST_FIX_ROUNDS = 3
 
+# Max rounds of reviewer → phantom-fix → re-review
+_MAX_PHANTOM_FIX_ROUNDS = 2
+
+# Patterns the reviewer uses when it can't find a file
+_PHANTOM_PATTERNS = re.compile(
+    r"(?:"
+    r"not found|does not exist|missing file|file missing|"
+    r"no such file|cannot find|couldn't find|could not find|"
+    r"phantom|doesn't exist|file not found"
+    r")",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class PipelineState:
@@ -260,6 +273,84 @@ class Pipeline:
         print_artifact_verification("reviewer", _art_path, _art_ok, "03_review_findings.md")
         if not _art_ok or not state.review_findings.strip():
             print_warning("Reviewer produced no findings — continuing with empty review.")
+
+        # ── Phase 3b: Phantom-file fix loop ──────────────────────────────
+        # If the reviewer found files that don't exist on disk, route back to
+        # the implementer before proceeding to the quality-fix phase.
+        # Max _MAX_PHANTOM_FIX_ROUNDS rounds to prevent infinite loops.
+        for phantom_round in range(_MAX_PHANTOM_FIX_ROUNDS):
+            phantoms = _parse_phantom_files(state.review_findings)
+            if not phantoms:
+                break
+
+            print_rule(
+                f"pipeline · phase 3b · phantom fix · round {phantom_round + 1}",
+                style="dim red",
+            )
+            console.print(
+                f"[yellow]Reviewer found {len(phantoms)} missing file(s) — "
+                f"routing back to implementer:[/yellow]"
+            )
+            for pf in phantoms:
+                console.print(f"  [dim red]✗ {pf}[/dim red]")
+
+            t = time.perf_counter()
+            before = _snap(impl)
+            pfix_msgs = self._phase_phantom_fix(state, phantoms, impl)
+            all_messages.extend(pfix_msgs)
+            key = f"phantom_fix_round{phantom_round + 1}"
+            self.metrics[key] = _phase_metrics(impl, before, time.perf_counter() - t)
+
+            # Verify the phantom fix wrote the files
+            _pfix_verify = verify_phase(key, pfix_msgs)
+            print_verification(_pfix_verify)
+            _pfix_manifest = _build_manifest(key, _pfix_verify)
+            _art_path, _art_sha = write_pipeline_artifact(
+                artifacts_dir,
+                f"03b_phantom_fix_manifest_r{phantom_round + 1}.md",
+                _pfix_manifest,
+            )
+            verify_artifact(key, _art_path, _art_sha, f"phantom_fix_manifest_r{phantom_round + 1}")
+
+            if not _pfix_verify.records:
+                print_warning(
+                    f"Phantom fix round {phantom_round + 1}: implementer still wrote "
+                    "no files — stopping phantom-fix loop."
+                )
+                log.warning("Phantom fix produced no writes in round %d", phantom_round + 1)
+                break
+
+            # Re-run reviewer on the now-complete set of files
+            print_rule(
+                f"pipeline · phase 3b · re-review · round {phantom_round + 1}",
+                style="dim yellow",
+            )
+            t = time.perf_counter()
+            before = _snap(reviewer)
+            all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
+            self.metrics[f"reviewer_recheck_round{phantom_round + 1}"] = _phase_metrics(
+                reviewer, before, time.perf_counter() - t
+            )
+            _art_path, _art_sha = write_pipeline_artifact(
+                artifacts_dir,
+                f"03b_review_recheck_r{phantom_round + 1}.md",
+                state.review_findings,
+            )
+            verify_artifact(
+                f"reviewer_recheck_round{phantom_round + 1}",
+                _art_path, _art_sha, "review_findings_recheck",
+            )
+        else:
+            # Exhausted phantom-fix rounds — warn and continue anyway
+            remaining = _parse_phantom_files(state.review_findings)
+            if remaining:
+                print_warning(
+                    f"Phantom-fix limit ({_MAX_PHANTOM_FIX_ROUNDS} rounds) reached. "
+                    f"{len(remaining)} file(s) still missing — continuing to quality-fix phase."
+                )
+                log.warning(
+                    "Phantom-fix limit reached | still_missing=%s", remaining
+                )
 
         # ── Phase 4: Implementer fix (HIGH + MEDIUM issues only) ─────────
         high, medium = _parse_findings(state.review_findings)
@@ -587,6 +678,40 @@ class Pipeline:
         log.info("Phase 3 (reviewer) complete | findings_chars=%d", len(review_text))
         return new_msgs
 
+    def _phase_phantom_fix(
+        self, state: PipelineState, phantoms: list[str], impl: Agent
+    ) -> list[Message]:
+        """
+        Implementer writes files the reviewer reported as missing.
+
+        Called when the reviewer finds phantom references — files it tried to
+        read that don't exist on disk.  We give the implementer a targeted
+        prompt listing only the missing files so it doesn't re-do work already
+        done correctly.
+        """
+        file_list = "\n".join(f"  - {p}" for p in phantoms)
+        prompt = (
+            "The code reviewer tried to read the following files but they do not "
+            "exist on disk:\n\n"
+            f"{file_list}\n\n"
+            "These files are required by the implementation plan. "
+            "Write each missing file now using write_file. "
+            "Do NOT re-write files that already exist — only create the missing ones.\n"
+            + _HANDOFF_INSTRUCTION
+        )
+        state.impl_history.append(Message(role="user", content=prompt))
+
+        fix_text, new_msgs = impl.run(
+            state.impl_history, rag_context=self.rag_context
+        )
+        state.impl_history.extend(new_msgs)
+
+        log.info(
+            "Phantom fix complete | missing_files=%d response_chars=%d",
+            len(phantoms), len(fix_text),
+        )
+        return new_msgs
+
     def _phase_fix(
         self, state: PipelineState, high: str, medium: str, impl: Agent
     ) -> list[Message]:
@@ -876,6 +1001,32 @@ def _parse_test_failures(test_text: str) -> list[tuple[str, str]]:
     # Verdict is FAIL but no parseable table rows — hand the full output to
     # the implementer so it can read the tester's prose and fix the issues.
     return [("(see tester output)", test_text[:1000])]
+
+
+def _parse_phantom_files(review_text: str) -> list[str]:
+    """
+    Scan reviewer output for file-not-found references.
+
+    Returns a deduplicated list of file paths the reviewer could not read.
+    Looks for lines that contain phantom-file language adjacent to a path-like
+    token (contains '/' or ends with a known extension).
+    """
+    phantoms: list[str] = []
+    seen: set[str] = set()
+    ext_re = re.compile(r"\.(py|rs|js|ts|toml|json|md|txt|yaml|yml|cfg|ini|sh)$", re.I)
+
+    for line in review_text.splitlines():
+        if not _PHANTOM_PATTERNS.search(line):
+            continue
+        # Extract path-like tokens from the line
+        for token in re.findall(r"[\w./\\-]+", line):
+            if ("/" in token or ext_re.search(token)) and token not in seen:
+                # Exclude obviously non-path tokens
+                if len(token) > 3 and not token.startswith("http"):
+                    seen.add(token)
+                    phantoms.append(token)
+
+    return phantoms
 
 
 def _parse_findings(review_text: str) -> tuple[str, str]:
