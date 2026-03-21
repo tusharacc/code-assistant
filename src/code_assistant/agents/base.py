@@ -169,19 +169,25 @@ class Agent:
             ))
 
             if not tool_calls_raw:
-                # Recovery: model failed to call any tools. Two distinct failure modes:
-                #   A) Code dump — response contains markdown code fences (``` blocks)
-                #   B) Summary/prose — response is analysis text with no code at all
-                # Both must be caught. Limit to one recovery attempt via flag.
-                if (
-                    self.use_tools
-                    and not getattr(self, "_markdown_recovery_fired", False)
-                ):
-                    has_code_fences = "```" in text
-                    self._markdown_recovery_fired = True  # type: ignore[attr-defined]
+                # Recovery: model failed to call any tools.
+                # Three distinct failure modes:
+                #   A) Code fences  — response has ``` blocks but no tool calls
+                #   B) Raw code     — response has indented/bare code but no backticks
+                #   C) Prose/summary — model described the plan instead of writing it
+                # Allow up to _MAX_RECOVERY_ROUNDS attempts with escalating urgency.
+                _recovery_count = getattr(self, "_recovery_count", 0)
+                _MAX_RECOVERY_ROUNDS = 3
+                if self.use_tools and _recovery_count < _MAX_RECOVERY_ROUNDS:
+                    self._recovery_count = _recovery_count + 1  # type: ignore[attr-defined]
+                    attempt = self._recovery_count  # 1, 2, or 3
+
+                    has_code_fences  = "```" in text
+                    has_raw_code     = any(
+                        kw in text for kw in ("def ", "class ", "fn ", "pub fn ", "import ", "from ")
+                    )
 
                     if has_code_fences:
-                        # Mode A: code dump — extract file paths so recovery is targeted
+                        # Mode A: markdown code dump
                         _path_re = re.compile(
                             r"(?m)^(?:#{1,4}\s+|>\s*\*\*)?([a-zA-Z0-9_\-./]+\.[a-z]{1,6})\b"
                         )
@@ -194,34 +200,43 @@ class Agent:
                             if mentioned else "  (see your previous response for the full list)"
                         )
                         recovery_msg = (
-                            "STOP. Your response contained code in markdown — "
-                            "that code does NOT exist on disk and the task is NOT complete.\n\n"
+                            f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
+                            "STOP. Code in markdown blocks does NOT exist on disk — the task is INCOMPLETE.\n\n"
                             "You MUST call write_file or edit_file for EVERY file. "
                             f"Files still needed:\n{file_list}\n\n"
-                            "Call write_file for the first file RIGHT NOW with its complete "
-                            "content. Do not summarise or explain — just call the tool."
+                            "Call write_file for the FIRST file RIGHT NOW. "
+                            "Complete content only — no explanations, no markdown."
                         )
-                        log.warning(
-                            "Tool-use failure: code dump with no tool calls "
-                            "— injecting recovery | role=%s round=%d chars=%d files=%d",
-                            self.role_label, round_num, len(text), len(mentioned),
+                    elif has_raw_code:
+                        # Mode B: raw code output (indented classes/functions, no backticks)
+                        # Model printed code as plain text — equally useless, equally wrong.
+                        recovery_msg = (
+                            f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
+                            "STOP. You printed code as plain text. That code does NOT exist as a file on disk.\n\n"
+                            "You MUST use the write_file tool to create files. "
+                            "Printing code — with or without markdown fences — has NO effect.\n\n"
+                            "Call write_file RIGHT NOW with:\n"
+                            "  path = the file path (e.g. src/agents/cloud_agent.py)\n"
+                            "  content = the complete file content\n\n"
+                            "Do NOT print any more code. Call the tool."
                         )
                     else:
-                        # Mode B: summary/prose — model read the spec and described it
-                        # instead of writing code. Point it directly at the first file.
+                        # Mode C: prose summary — described the plan instead of coding
                         recovery_msg = (
-                            "STOP. You wrote a summary/analysis instead of code. "
+                            f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
+                            "STOP. You wrote a summary instead of code. "
                             "Your job is to IMPLEMENT — write actual files to disk.\n\n"
-                            "Do NOT explain the plan. Do NOT describe what you will do. "
-                            "Call write_file RIGHT NOW for the first source file with its "
-                            "complete, working content. One tool call per file. Start immediately."
-                        )
-                        log.warning(
-                            "Tool-use failure: prose summary with no tool calls "
-                            "— injecting recovery | role=%s round=%d chars=%d",
-                            self.role_label, round_num, len(text),
+                            "Do NOT explain. Do NOT describe. "
+                            "Call write_file RIGHT NOW for the first source file "
+                            "with its complete, working content."
                         )
 
+                    log.warning(
+                        "Tool-use failure (attempt %d/%d): mode=%s role=%s round=%d chars=%d",
+                        attempt, _MAX_RECOVERY_ROUNDS,
+                        "code_fence" if has_code_fences else ("raw_code" if has_raw_code else "prose"),
+                        self.role_label, round_num, len(text),
+                    )
                     raw.append({"role": "user", "content": recovery_msg})
                     continue  # retry with the targeted correction
 
