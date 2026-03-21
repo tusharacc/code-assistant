@@ -47,3 +47,6 @@ code_assistant.md
 
 # AST symbol index
 .ca_ast/
+
+# Pipeline artifacts symlink (points at latest run dir — local only)
+.ca_pipeline/latest

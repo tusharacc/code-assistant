@@ -155,12 +155,13 @@ SPEC_SLASH_HELP = """
 
 
 class REPL:
-    def __init__(self, resume: str | None = None) -> None:
+    def __init__(self, resume: str | None = None, resume_pipeline: bool = False) -> None:
         self.history = History()
         self.retriever: ContextProvider = CodebaseRetriever()
         self.ast_retriever = ASTRetriever()
         self.debate_enabled = config.debate_enabled
         self.pipeline_enabled = config.use_pipeline
+        self.resume_pipeline = resume_pipeline
         self._log = get_logger(__name__)
         self._prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(_PROMPT_HISTORY_FILE)),
@@ -270,6 +271,7 @@ class REPL:
             debate_enabled=self.debate_enabled,
             pipeline_enabled=self.pipeline_enabled,
             rag_context=rag_context,
+            resume_pipeline=self.resume_pipeline,
         )
         try:
             new_messages = orchestrator.run(text)
@@ -854,6 +856,10 @@ def _run_quick(query: str, log_level: str) -> None:
 def main(
     prompt: Optional[str] = typer.Argument(None, help="One-shot prompt (skip REPL)"),
     resume: Optional[str] = typer.Option(None, "--resume", "-r", help="Resume a saved session"),
+    resume_pipeline: bool = typer.Option(
+        False, "--resume-pipeline",
+        help="Resume pipeline from last failure point instead of starting fresh",
+    ),
     no_debate: bool = typer.Option(False, "--no-debate", help="Disable dual-agent debate mode"),
     pipeline: bool = typer.Option(False, "--pipeline", "-p", help="Enable 4-persona pipeline mode"),
     quick: bool = typer.Option(
@@ -929,7 +935,7 @@ def main(
         spec_repl.run()
         return
 
-    repl = REPL(resume=resume)
+    repl = REPL(resume=resume, resume_pipeline=resume_pipeline)
 
     # ── Load requirement document into context ───────────────────────
     initial_input: str | None = None

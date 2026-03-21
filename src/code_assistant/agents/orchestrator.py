@@ -84,11 +84,13 @@ class Orchestrator:
         debate_enabled: bool | None = None,
         pipeline_enabled: bool | None = None,
         rag_context: str | None = None,
+        resume_pipeline: bool = False,
     ) -> None:
         self.history = history
         self.debate_enabled = debate_enabled if debate_enabled is not None else config.debate_enabled
         self.pipeline_enabled = pipeline_enabled if pipeline_enabled is not None else config.use_pipeline
         self.rag_context = rag_context
+        self.resume_pipeline = resume_pipeline
         self._architect: Agent | None = None
         self._implementer: Agent | None = None
 
@@ -380,5 +382,6 @@ class Orchestrator:
         pipeline = Pipeline(
             rag_context=self.rag_context,
             initial_history=self.history,   # carries loaded req-file into architect context
+            resume=self.resume_pipeline,
         )
         return pipeline.run(user_input)

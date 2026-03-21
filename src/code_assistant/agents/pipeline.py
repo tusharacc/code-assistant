@@ -9,7 +9,9 @@ Per-persona conversation histories are maintained across phases for coherent con
 """
 from __future__ import annotations
 
+import json
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 
@@ -73,6 +75,9 @@ _FAIL_ROW = re.compile(r"\|\s*(.+?)\s*\|\s*FAIL\s*\|\s*(.+?)\s*\|", re.IGNORECAS
 
 # Max rounds of tester → implementer-fix → re-test
 _MAX_TEST_FIX_ROUNDS = 3
+
+# Symlink pointing at the most-recent pipeline artifacts dir
+_LATEST_LINK = ".ca_pipeline/latest"
 
 # Max rounds of reviewer → phantom-fix → re-review
 _MAX_PHANTOM_FIX_ROUNDS = 2
@@ -144,13 +149,154 @@ class Pipeline:
         self,
         rag_context: str | None = None,
         initial_history: list[Message] | None = None,
+        resume: bool = False,
     ) -> None:
         self.rag_context = rag_context
         self.initial_history: list[Message] = initial_history or []
+        self.resume = resume
         # Populated by run() — keyed by phase name, plus "elapsed_total"
         self.metrics: dict = {}
         # Preserved after run() for feedback collection; None before first run
         self.last_state: PipelineState | None = None
+
+    def _find_latest_artifacts(self):
+        """Return the most recent .ca_pipeline/<ts>/ dir, or None."""
+        from pathlib import Path as _Path
+        base = _Path.cwd() / ".ca_pipeline"
+        latest = base / "latest"
+        if latest.is_symlink() and latest.resolve().is_dir():
+            return latest.resolve()
+        # Fallback: scan for newest timestamped dir
+        if base.is_dir():
+            dirs = sorted(
+                [d for d in base.iterdir() if d.is_dir() and d.name != "latest"],
+                key=lambda d: d.name,
+                reverse=True,
+            )
+            return dirs[0] if dirs else None
+        return None
+
+    def _detect_resume_point(self, prev_dir) -> tuple[int, "PipelineState"]:
+        """Inspect prev_dir artifacts and return (resume_from_phase, reconstructed_state).
+
+        resume_from_phase is the first phase that is NOT done (1-7), or 8 if all done.
+        """
+        from pathlib import Path as _Path
+
+        state = PipelineState()
+
+        def _read(fname: str) -> str:
+            try:
+                p = _Path(prev_dir) / fname
+                if p.exists():
+                    return p.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            return ""
+
+        def _latest_test_results() -> str:
+            """Return content of the highest-numbered 07_test_results_rN.md."""
+            try:
+                candidates = sorted(
+                    [f for f in _Path(prev_dir).iterdir()
+                     if f.name.startswith("07_test_results_r") and f.suffix == ".md"],
+                    key=lambda f: f.name,
+                    reverse=True,
+                )
+                if candidates:
+                    return candidates[0].read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+            return ""
+
+        def _manifest_files_exist(manifest_content: str) -> bool:
+            """Check that at least one path listed in an impl manifest exists on disk."""
+            if not manifest_content.strip():
+                return False
+            for line in manifest_content.splitlines():
+                line = line.strip()
+                if line.startswith("- ") and " sha256:" in line:
+                    # Format: "- /path/to/file.py sha256:abc123"
+                    path_part = line[2:].split(" sha256:")[0].strip()
+                    if path_part and _Path(path_part).exists():
+                        return True
+            return False
+
+        # --- Phase 1 done? ---
+        arch_plan = _read("01_arch_plan.md")
+        if not arch_plan.strip():
+            return 1, state
+
+        state.arch_plan = arch_plan
+        state.arch_history = [
+            Message(role="user", content="[Resumed] Architect plan loaded from previous run."),
+            Message(role="assistant", content=arch_plan),
+        ]
+
+        # --- Phase 2 done? ---
+        impl_manifest = _read("02_impl_manifest.md")
+        if not impl_manifest.strip() or not _manifest_files_exist(impl_manifest):
+            return 2, state
+
+        # Build a synthetic impl_history listing what was written
+        manifest_lines = [
+            line.strip()[2:].split(" sha256:")[0].strip()
+            for line in impl_manifest.splitlines()
+            if line.strip().startswith("- ") and " sha256:" in line
+        ]
+        files_summary = "\n".join(f"  {p}" for p in manifest_lines) if manifest_lines else "  (none listed)"
+        state.impl_history = [
+            Message(
+                role="user",
+                content=f"[Resumed] Previous implementer run. Files written:\n{files_summary}",
+            ),
+            Message(role="assistant", content="Understood, implementation from previous run loaded."),
+        ]
+
+        # --- Phase 3 done? ---
+        review_findings = _read("03_review_findings.md")
+        if not review_findings.strip():
+            return 3, state
+        # Check for phantom-file mentions — if reviewer couldn't find files, phase 3 is not clean
+        if _PHANTOM_PATTERNS.search(review_findings):
+            return 3, state
+
+        state.review_findings = review_findings
+
+        # --- Phase 4 done? ---
+        fix_manifest = _read("04_fix_manifest.md")
+        if not fix_manifest.strip():
+            return 4, state
+
+        # --- Phase 5 done? ---
+        run_instructions = _read("05_run_instructions.md")
+        acceptance_criteria = _read("06_acceptance_criteria.md")
+        if not run_instructions.strip() or not acceptance_criteria.strip():
+            return 5, state
+
+        state.run_instructions = run_instructions
+        state.acceptance_criteria = acceptance_criteria
+
+        # --- Phase 6 done? ---
+        test_results = _latest_test_results()
+        if not test_results.strip():
+            return 6, state
+        # Only consider phase 6 done if the latest test run PASSED
+        if _VERDICT_FAIL.search(test_results):
+            state.test_results = test_results
+            return 6, state
+
+        state.test_results = test_results
+
+        # --- Phase 7 done? ---
+        doc_output = _read("08_doc_output.md")
+        if not doc_output.strip():
+            return 7, state
+
+        state.doc_output = doc_output
+
+        # All phases done
+        return 8, state
 
     def run(self, user_task: str) -> list[Message]:
         """Execute all pipeline phases. Returns all produced messages."""
@@ -166,6 +312,26 @@ class Pipeline:
         artifacts_dir = _Path.cwd() / ".ca_pipeline" / _run_ts
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         log.info("Pipeline artifacts dir: %s", artifacts_dir)
+
+        # ── Resume logic ─────────────────────────────────────────────────
+        resume_from = 0
+        if self.resume:
+            prev_dir = self._find_latest_artifacts()
+            if prev_dir and prev_dir != artifacts_dir:
+                resume_from, state = self._detect_resume_point(prev_dir)
+                if resume_from > 1:
+                    print_info(
+                        f"Resuming from phase {resume_from} "
+                        f"(previous run: {prev_dir.name})"
+                    )
+                    log.info(
+                        "Pipeline resume | from_phase=%d prev_dir=%s",
+                        resume_from, prev_dir,
+                    )
+                else:
+                    print_info("No completed phases found in previous run — starting fresh.")
+            else:
+                print_info("No previous run found — starting fresh.")
 
         # Create all agents once — each phase receives the same objects.
         # keep_alive=0 ensures Ollama unloads each model after every response
@@ -199,206 +365,229 @@ class Pipeline:
         t0 = time.perf_counter()
 
         # ── Phase 1: Architect ───────────────────────────────────────────
-        print_rule("pipeline · phase 1 · architect", style="dim cyan")
-        t = time.perf_counter()
-        before = _snap(arch)
-        all_messages.extend(self._phase_architect(user_task, state, arch))
-        self.metrics["architect"] = _phase_metrics(arch, before, time.perf_counter() - t)
+        if resume_from <= 1:
+            print_rule("pipeline · phase 1 · architect", style="dim cyan")
+            t = time.perf_counter()
+            before = _snap(arch)
+            all_messages.extend(self._phase_architect(user_task, state, arch))
+            self.metrics["architect"] = _phase_metrics(arch, before, time.perf_counter() - t)
 
-        # Artifact: arch plan (pipeline writes it — architect has no tools)
-        _art_path, _art_sha = write_pipeline_artifact(
-            artifacts_dir, "01_arch_plan.md", state.arch_plan
-        )
-        _art_ok = verify_artifact("architect", _art_path, _art_sha, "arch_plan")
-        print_artifact_verification("architect", _art_path, _art_ok, "01_arch_plan.md")
-        if not _art_ok or not state.arch_plan.strip():
-            print_error("Pipeline halted: architect produced no plan.")
-            return all_messages
+            # Artifact: arch plan (pipeline writes it — architect has no tools)
+            _art_path, _art_sha = write_pipeline_artifact(
+                artifacts_dir, "01_arch_plan.md", state.arch_plan
+            )
+            _art_ok = verify_artifact("architect", _art_path, _art_sha, "arch_plan")
+            print_artifact_verification("architect", _art_path, _art_ok, "01_arch_plan.md")
+            if not _art_ok or not state.arch_plan.strip():
+                print_error("Pipeline halted: architect produced no plan.")
+                return all_messages
+        else:
+            print_info("↷ Phase 1 (architect) — skipped (loaded from previous run)")
+            log.info("Resume: skipping phase 1")
 
         # ── Phase 2: Implementer (with optional Q&A with architect) ──────
-        print_rule("pipeline · phase 2 · implementer", style="dim green")
-        t = time.perf_counter()
-        before_impl = _snap(impl)
-        before_arch = _snap(arch)  # arch may be called during Q&A
-        impl_msgs = self._phase_implementer(user_task, state, arch, impl)
-        all_messages.extend(impl_msgs)
-        self.metrics["implementer"] = _phase_metrics(impl, before_impl, time.perf_counter() - t)
-        self.metrics["implementer_qa_arch"] = _phase_metrics(arch, before_arch, 0)
+        if resume_from <= 2:
+            print_rule("pipeline · phase 2 · implementer", style="dim green")
+            t = time.perf_counter()
+            before_impl = _snap(impl)
+            before_arch = _snap(arch)  # arch may be called during Q&A
+            impl_msgs = self._phase_implementer(user_task, state, arch, impl)
+            all_messages.extend(impl_msgs)
+            self.metrics["implementer"] = _phase_metrics(impl, before_impl, time.perf_counter() - t)
+            self.metrics["implementer_qa_arch"] = _phase_metrics(arch, before_arch, 0)
 
-        # ── Gate: SHA-256 verify implementer handoff ─────────────────────
-        _impl_verify = verify_phase("implementer", state.impl_history)
-        print_verification(_impl_verify)
+            # ── Gate: SHA-256 verify implementer handoff ─────────────────────
+            _impl_verify = verify_phase("implementer", state.impl_history)
+            print_verification(_impl_verify)
 
-        # Artifact: impl manifest (paths + SHAs of every file claimed)
-        _impl_manifest = _build_manifest("implementer", _impl_verify)
-        _art_path, _art_sha = write_pipeline_artifact(
-            artifacts_dir, "02_impl_manifest.md", _impl_manifest
-        )
-        _art_ok = verify_artifact("implementer", _art_path, _art_sha, "impl_manifest")
-        print_artifact_verification("implementer", _art_path, _art_ok, "02_impl_manifest.md")
-
-        if not _impl_verify.records:
-            print_error(
-                "Pipeline halted: implementer made no write_file/edit_file calls. "
-                "Review and test phases require actual code on disk."
+            # Artifact: impl manifest (paths + SHAs of every file claimed)
+            _impl_manifest = _build_manifest("implementer", _impl_verify)
+            _art_path, _art_sha = write_pipeline_artifact(
+                artifacts_dir, "02_impl_manifest.md", _impl_manifest
             )
-            log.error("Pipeline halted: no file writes detected in impl_history")
-            return all_messages
-        if not _impl_verify.passed:
-            print_error(
-                f"Pipeline halted: {len(_impl_verify.missing)} file(s) missing, "
-                f"{len(_impl_verify.mismatched)} SHA mismatch(es). "
-                "Reviewer cannot review phantom files."
-            )
-            log.error(
-                "Pipeline halted: verification failed | missing=%s mismatched=%s",
-                _impl_verify.missing, _impl_verify.mismatched,
-            )
-            return all_messages
+            _art_ok = verify_artifact("implementer", _art_path, _art_sha, "impl_manifest")
+            print_artifact_verification("implementer", _art_path, _art_ok, "02_impl_manifest.md")
 
-        log.info("Implementer gate passed | files=%d", _impl_verify.file_count)
+            if not _impl_verify.records:
+                print_error(
+                    "Pipeline halted: implementer made no write_file/edit_file calls. "
+                    "Review and test phases require actual code on disk."
+                )
+                log.error("Pipeline halted: no file writes detected in impl_history")
+                return all_messages
+            if not _impl_verify.passed:
+                print_error(
+                    f"Pipeline halted: {len(_impl_verify.missing)} file(s) missing, "
+                    f"{len(_impl_verify.mismatched)} SHA mismatch(es). "
+                    "Reviewer cannot review phantom files."
+                )
+                log.error(
+                    "Pipeline halted: verification failed | missing=%s mismatched=%s",
+                    _impl_verify.missing, _impl_verify.mismatched,
+                )
+                return all_messages
+
+            log.info("Implementer gate passed | files=%d", _impl_verify.file_count)
+        else:
+            print_info("↷ Phase 2 (implementer) — skipped (files already on disk)")
+            log.info("Resume: skipping phase 2")
 
         # ── Phase 3: Reviewer ────────────────────────────────────────────
-        print_rule("pipeline · phase 3 · reviewer", style="dim yellow")
-        t = time.perf_counter()
-        before = _snap(reviewer)
-        all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
-        self.metrics["reviewer"] = _phase_metrics(reviewer, before, time.perf_counter() - t)
-
-        # Artifact: review findings
-        _art_path, _art_sha = write_pipeline_artifact(
-            artifacts_dir, "03_review_findings.md", state.review_findings
-        )
-        _art_ok = verify_artifact("reviewer", _art_path, _art_sha, "review_findings")
-        print_artifact_verification("reviewer", _art_path, _art_ok, "03_review_findings.md")
-        if not _art_ok or not state.review_findings.strip():
-            print_warning("Reviewer produced no findings — continuing with empty review.")
-
-        # ── Phase 3b: Phantom-file fix loop ──────────────────────────────
-        # If the reviewer found files that don't exist on disk, route back to
-        # the implementer before proceeding to the quality-fix phase.
-        # Max _MAX_PHANTOM_FIX_ROUNDS rounds to prevent infinite loops.
-        for phantom_round in range(_MAX_PHANTOM_FIX_ROUNDS):
-            phantoms = _parse_phantom_files(state.review_findings)
-            if not phantoms:
-                break
-
-            print_rule(
-                f"pipeline · phase 3b · phantom fix · round {phantom_round + 1}",
-                style="dim red",
-            )
-            console.print(
-                f"[yellow]Reviewer found {len(phantoms)} missing file(s) — "
-                f"routing back to implementer:[/yellow]"
-            )
-            for pf in phantoms:
-                console.print(f"  [dim red]✗ {pf}[/dim red]")
-
-            t = time.perf_counter()
-            before = _snap(impl)
-            pfix_msgs = self._phase_phantom_fix(state, phantoms, impl)
-            all_messages.extend(pfix_msgs)
-            key = f"phantom_fix_round{phantom_round + 1}"
-            self.metrics[key] = _phase_metrics(impl, before, time.perf_counter() - t)
-
-            # Verify the phantom fix wrote the files
-            _pfix_verify = verify_phase(key, pfix_msgs)
-            print_verification(_pfix_verify)
-            _pfix_manifest = _build_manifest(key, _pfix_verify)
-            _art_path, _art_sha = write_pipeline_artifact(
-                artifacts_dir,
-                f"03b_phantom_fix_manifest_r{phantom_round + 1}.md",
-                _pfix_manifest,
-            )
-            verify_artifact(key, _art_path, _art_sha, f"phantom_fix_manifest_r{phantom_round + 1}")
-
-            if not _pfix_verify.records:
-                print_warning(
-                    f"Phantom fix round {phantom_round + 1}: implementer still wrote "
-                    "no files — stopping phantom-fix loop."
-                )
-                log.warning("Phantom fix produced no writes in round %d", phantom_round + 1)
-                break
-
-            # Re-run reviewer on the now-complete set of files
-            print_rule(
-                f"pipeline · phase 3b · re-review · round {phantom_round + 1}",
-                style="dim yellow",
-            )
+        if resume_from <= 3:
+            print_rule("pipeline · phase 3 · reviewer", style="dim yellow")
             t = time.perf_counter()
             before = _snap(reviewer)
             all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
-            self.metrics[f"reviewer_recheck_round{phantom_round + 1}"] = _phase_metrics(
-                reviewer, before, time.perf_counter() - t
-            )
+            self.metrics["reviewer"] = _phase_metrics(reviewer, before, time.perf_counter() - t)
+
+            # Artifact: review findings
             _art_path, _art_sha = write_pipeline_artifact(
-                artifacts_dir,
-                f"03b_review_recheck_r{phantom_round + 1}.md",
-                state.review_findings,
+                artifacts_dir, "03_review_findings.md", state.review_findings
             )
-            verify_artifact(
-                f"reviewer_recheck_round{phantom_round + 1}",
-                _art_path, _art_sha, "review_findings_recheck",
-            )
+            _art_ok = verify_artifact("reviewer", _art_path, _art_sha, "review_findings")
+            print_artifact_verification("reviewer", _art_path, _art_ok, "03_review_findings.md")
+            if not _art_ok or not state.review_findings.strip():
+                print_warning("Reviewer produced no findings — continuing with empty review.")
+
+            # ── Phase 3b: Phantom-file fix loop ──────────────────────────────
+            # If the reviewer found files that don't exist on disk, route back to
+            # the implementer before proceeding to the quality-fix phase.
+            # Max _MAX_PHANTOM_FIX_ROUNDS rounds to prevent infinite loops.
+            for phantom_round in range(_MAX_PHANTOM_FIX_ROUNDS):
+                phantoms = _parse_phantom_files(state.review_findings)
+                if not phantoms:
+                    break
+
+                print_rule(
+                    f"pipeline · phase 3b · phantom fix · round {phantom_round + 1}",
+                    style="dim red",
+                )
+                console.print(
+                    f"[yellow]Reviewer found {len(phantoms)} missing file(s) — "
+                    f"routing back to implementer:[/yellow]"
+                )
+                for pf in phantoms:
+                    console.print(f"  [dim red]✗ {pf}[/dim red]")
+
+                t = time.perf_counter()
+                before = _snap(impl)
+                pfix_msgs = self._phase_phantom_fix(state, phantoms, impl)
+                all_messages.extend(pfix_msgs)
+                key = f"phantom_fix_round{phantom_round + 1}"
+                self.metrics[key] = _phase_metrics(impl, before, time.perf_counter() - t)
+
+                # Verify the phantom fix wrote the files
+                _pfix_verify = verify_phase(key, pfix_msgs)
+                print_verification(_pfix_verify)
+                _pfix_manifest = _build_manifest(key, _pfix_verify)
+                _art_path, _art_sha = write_pipeline_artifact(
+                    artifacts_dir,
+                    f"03b_phantom_fix_manifest_r{phantom_round + 1}.md",
+                    _pfix_manifest,
+                )
+                verify_artifact(key, _art_path, _art_sha, f"phantom_fix_manifest_r{phantom_round + 1}")
+
+                if not _pfix_verify.records:
+                    print_warning(
+                        f"Phantom fix round {phantom_round + 1}: implementer still wrote "
+                        "no files — stopping phantom-fix loop."
+                    )
+                    log.warning("Phantom fix produced no writes in round %d", phantom_round + 1)
+                    break
+
+                # Re-run reviewer on the now-complete set of files
+                print_rule(
+                    f"pipeline · phase 3b · re-review · round {phantom_round + 1}",
+                    style="dim yellow",
+                )
+                t = time.perf_counter()
+                before = _snap(reviewer)
+                all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
+                self.metrics[f"reviewer_recheck_round{phantom_round + 1}"] = _phase_metrics(
+                    reviewer, before, time.perf_counter() - t
+                )
+                _art_path, _art_sha = write_pipeline_artifact(
+                    artifacts_dir,
+                    f"03b_review_recheck_r{phantom_round + 1}.md",
+                    state.review_findings,
+                )
+                verify_artifact(
+                    f"reviewer_recheck_round{phantom_round + 1}",
+                    _art_path, _art_sha, "review_findings_recheck",
+                )
+            else:
+                # Exhausted phantom-fix rounds — warn and continue anyway
+                remaining = _parse_phantom_files(state.review_findings)
+                if remaining:
+                    print_warning(
+                        f"Phantom-fix limit ({_MAX_PHANTOM_FIX_ROUNDS} rounds) reached. "
+                        f"{len(remaining)} file(s) still missing — continuing to quality-fix phase."
+                    )
+                    log.warning(
+                        "Phantom-fix limit reached | still_missing=%s", remaining
+                    )
         else:
-            # Exhausted phantom-fix rounds — warn and continue anyway
-            remaining = _parse_phantom_files(state.review_findings)
-            if remaining:
-                print_warning(
-                    f"Phantom-fix limit ({_MAX_PHANTOM_FIX_ROUNDS} rounds) reached. "
-                    f"{len(remaining)} file(s) still missing — continuing to quality-fix phase."
-                )
-                log.warning(
-                    "Phantom-fix limit reached | still_missing=%s", remaining
-                )
+            print_info("↷ Phase 3 (reviewer) — skipped (loaded from previous run)")
+            log.info("Resume: skipping phase 3")
 
         # ── Phase 4: Implementer fix (HIGH + MEDIUM issues only) ─────────
-        high, medium = _parse_findings(state.review_findings)
-        if high or medium:
-            print_rule("pipeline · phase 4 · implementer fix", style="dim green")
-            t = time.perf_counter()
-            before = _snap(impl)
-            fix_msgs = self._phase_fix(state, high, medium, impl)
-            all_messages.extend(fix_msgs)
-            self.metrics["implementer_fix"] = _phase_metrics(impl, before, time.perf_counter() - t)
+        if resume_from <= 4:
+            high, medium = _parse_findings(state.review_findings)
+            if high or medium:
+                print_rule("pipeline · phase 4 · implementer fix", style="dim green")
+                t = time.perf_counter()
+                before = _snap(impl)
+                fix_msgs = self._phase_fix(state, high, medium, impl)
+                all_messages.extend(fix_msgs)
+                self.metrics["implementer_fix"] = _phase_metrics(impl, before, time.perf_counter() - t)
 
-            # Verify the fix + artifact
-            _fix_verify = verify_phase("implementer_fix", fix_msgs)
-            print_verification(_fix_verify)
-            _fix_manifest = _build_manifest("implementer_fix", _fix_verify)
-            _art_path, _art_sha = write_pipeline_artifact(
-                artifacts_dir, "04_fix_manifest.md", _fix_manifest
-            )
-            _art_ok = verify_artifact("implementer_fix", _art_path, _art_sha, "fix_manifest")
-            print_artifact_verification("implementer_fix", _art_path, _art_ok, "04_fix_manifest.md")
-            if _fix_verify.records and not _fix_verify.passed:
-                print_warning(
-                    f"Fix verification: {len(_fix_verify.missing)} file(s) missing, "
-                    f"{len(_fix_verify.mismatched)} SHA mismatch(es) — "
-                    "continuing to test phase with possibly incomplete fixes."
+                # Verify the fix + artifact
+                _fix_verify = verify_phase("implementer_fix", fix_msgs)
+                print_verification(_fix_verify)
+                _fix_manifest = _build_manifest("implementer_fix", _fix_verify)
+                _art_path, _art_sha = write_pipeline_artifact(
+                    artifacts_dir, "04_fix_manifest.md", _fix_manifest
                 )
-                log.warning(
-                    "Fix phase verification failed (non-halting) | missing=%s mismatched=%s",
-                    _fix_verify.missing, _fix_verify.mismatched,
-                )
+                _art_ok = verify_artifact("implementer_fix", _art_path, _art_sha, "fix_manifest")
+                print_artifact_verification("implementer_fix", _art_path, _art_ok, "04_fix_manifest.md")
+                if _fix_verify.records and not _fix_verify.passed:
+                    print_warning(
+                        f"Fix verification: {len(_fix_verify.missing)} file(s) missing, "
+                        f"{len(_fix_verify.mismatched)} SHA mismatch(es) — "
+                        "continuing to test phase with possibly incomplete fixes."
+                    )
+                    log.warning(
+                        "Fix phase verification failed (non-halting) | missing=%s mismatched=%s",
+                        _fix_verify.missing, _fix_verify.mismatched,
+                    )
+            else:
+                print_info("No HIGH/MEDIUM issues — skipping fix phase.")
+                log.info("Pipeline: no HIGH/MEDIUM findings, skipping fix phase")
         else:
-            print_info("No HIGH/MEDIUM issues — skipping fix phase.")
-            log.info("Pipeline: no HIGH/MEDIUM findings, skipping fix phase")
+            print_info("↷ Phase 4 (implementer fix) — skipped (loaded from previous run)")
+            log.info("Resume: skipping phase 4")
 
         # ── Phase 5: Gather run info from implementer & architect ────────
-        self._gather_run_info(state, arch, impl)
+        if resume_from <= 5:
+            self._gather_run_info(state, arch, impl)
 
-        # Artifacts: run instructions + acceptance criteria
-        for _fname, _content, _label in [
-            ("05_run_instructions.md", state.run_instructions, "run_instructions"),
-            ("06_acceptance_criteria.md", state.acceptance_criteria, "acceptance_criteria"),
-        ]:
-            _art_path, _art_sha = write_pipeline_artifact(artifacts_dir, _fname, _content)
-            _art_ok = verify_artifact("run_info", _art_path, _art_sha, _label)
-            print_artifact_verification("run_info", _art_path, _art_ok, _fname)
+            # Artifacts: run instructions + acceptance criteria
+            for _fname, _content, _label in [
+                ("05_run_instructions.md", state.run_instructions, "run_instructions"),
+                ("06_acceptance_criteria.md", state.acceptance_criteria, "acceptance_criteria"),
+            ]:
+                _art_path, _art_sha = write_pipeline_artifact(artifacts_dir, _fname, _content)
+                _art_ok = verify_artifact("run_info", _art_path, _art_sha, _label)
+                print_artifact_verification("run_info", _art_path, _art_ok, _fname)
+        else:
+            print_info("↷ Phase 5 (run info) — skipped (loaded from previous run)")
+            log.info("Resume: skipping phase 5")
 
         # ── Phase 6+: Tester with fix-loop ───────────────────────────────
-        for test_round in range(_MAX_TEST_FIX_ROUNDS):
+        if resume_from > 6:
+            print_info("↷ Phase 6 (tester) — skipped (previous run passed all criteria)")
+            log.info("Resume: skipping phase 6")
+        for test_round in range(_MAX_TEST_FIX_ROUNDS if resume_from <= 6 else 0):
             round_label = f"pipeline · tester · round {test_round + 1}/{_MAX_TEST_FIX_ROUNDS}"
             print_rule(round_label, style="dim magenta")
             t = time.perf_counter()
@@ -477,21 +666,26 @@ class Pipeline:
                 )
 
         # ── Phase 7: Documentation writer ────────────────────────────────
-        print_rule("pipeline · phase 7 · documentation", style="dim blue")
-        t = time.perf_counter()
-        before = _snap(impl)
-        doc_msgs = self._phase_docs(user_task, state, impl)
-        all_messages.extend(doc_msgs)
-        self.metrics["docs"] = _phase_metrics(impl, before, time.perf_counter() - t)
+        if resume_from <= 7:
+            print_rule("pipeline · phase 7 · documentation", style="dim blue")
+            t = time.perf_counter()
+            before = _snap(impl)
+            doc_msgs = self._phase_docs(user_task, state, impl)
+            all_messages.extend(doc_msgs)
+            self.metrics["docs"] = _phase_metrics(impl, before, time.perf_counter() - t)
+        else:
+            print_info("↷ Phase 7 (documentation) — skipped (loaded from previous run)")
+            log.info("Resume: skipping phase 7")
 
         # Artifact: doc output + verify README written to disk
-        _art_path, _art_sha = write_pipeline_artifact(
-            artifacts_dir, "08_doc_output.md", state.doc_output
-        )
-        _art_ok = verify_artifact("docs", _art_path, _art_sha, "doc_output")
-        print_artifact_verification("docs", _art_path, _art_ok, "08_doc_output.md")
-        _docs_verify = verify_phase("docs", doc_msgs)
-        print_verification(_docs_verify)
+        if resume_from <= 7:
+            _art_path, _art_sha = write_pipeline_artifact(
+                artifacts_dir, "08_doc_output.md", state.doc_output
+            )
+            _art_ok = verify_artifact("docs", _art_path, _art_sha, "doc_output")
+            print_artifact_verification("docs", _art_path, _art_ok, "08_doc_output.md")
+            _docs_verify = verify_phase("docs", doc_msgs)
+            print_verification(_docs_verify)
 
         self.metrics["elapsed_total"] = time.perf_counter() - t0
 
@@ -543,6 +737,16 @@ class Pipeline:
                 log.info("project_context: code_assistant.md updated after pipeline run")
         except Exception as _e:
             log.warning("project_context update failed (non-fatal): %s", _e)
+
+        # ── Update .ca_pipeline/latest symlink to this run's artifacts ───
+        try:
+            from pathlib import Path as _Path
+            latest_link = _Path.cwd() / ".ca_pipeline" / "latest"
+            if latest_link.is_symlink():
+                latest_link.unlink()
+            latest_link.symlink_to(artifacts_dir)
+        except Exception as _e:
+            log.warning("Could not update .ca_pipeline/latest symlink: %s", _e)
 
         return all_messages
 
