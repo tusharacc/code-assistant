@@ -119,7 +119,11 @@ class Orchestrator:
         intent = _classify_intent(user_input)
 
         is_complex         = intent == "complex"
-        use_pipeline       = self.pipeline_enabled and is_complex
+        # Pipeline runs for any non-conversational task when explicitly enabled.
+        # The intent classifier uses "complex" for heavy multi-file work and
+        # "implementation" for simpler tasks — both belong in the pipeline.
+        # Only pure Q&A ("conversational") bypasses it so quick questions stay fast.
+        use_pipeline       = self.pipeline_enabled and intent != "conversational"
         use_debate         = not use_pipeline and self.debate_enabled and is_complex
         use_conversational = intent == "conversational" and not use_pipeline and not use_debate
 
