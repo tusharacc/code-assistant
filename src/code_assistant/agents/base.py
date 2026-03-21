@@ -186,6 +186,16 @@ class Agent:
                         kw in text for kw in ("def ", "class ", "fn ", "pub fn ", "import ", "from ")
                     )
 
+                    # Format spec injected in every recovery message so the model
+                    # knows exactly how to express a tool call regardless of mode.
+                    _FMT = (
+                        "REQUIRED FORMAT — use one of these two forms, nothing else:\n"
+                        '  JSON:  {"name": "write_file", "arguments": {"path": "src/foo.py", "content": "..."}}\n'
+                        "  KV:    write_file path=src/foo.py content='...'\n"
+                        "Do NOT wrap in markdown. Do NOT print plain code. "
+                        "Output the tool call as the very first token of your response."
+                    )
+
                     if has_code_fences:
                         # Mode A: markdown code dump
                         _path_re = re.compile(
@@ -201,34 +211,27 @@ class Agent:
                         )
                         recovery_msg = (
                             f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
-                            "STOP. Code in markdown blocks does NOT exist on disk — the task is INCOMPLETE.\n\n"
-                            "You MUST call write_file or edit_file for EVERY file. "
+                            "STOP. Your markdown code blocks do NOT create files — nothing was written to disk.\n\n"
+                            "Your code is correct. You only need to REFORMAT it as tool calls.\n"
                             f"Files still needed:\n{file_list}\n\n"
-                            "Call write_file for the FIRST file RIGHT NOW. "
-                            "Complete content only — no explanations, no markdown."
+                            f"{_FMT}"
                         )
                     elif has_raw_code:
                         # Mode B: raw code output (indented classes/functions, no backticks)
-                        # Model printed code as plain text — equally useless, equally wrong.
                         recovery_msg = (
                             f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
                             "STOP. You printed code as plain text. That code does NOT exist as a file on disk.\n\n"
-                            "You MUST use the write_file tool to create files. "
-                            "Printing code — with or without markdown fences — has NO effect.\n\n"
-                            "Call write_file RIGHT NOW with:\n"
-                            "  path = the file path (e.g. src/agents/cloud_agent.py)\n"
-                            "  content = the complete file content\n\n"
-                            "Do NOT print any more code. Call the tool."
+                            "Your code is correct. You only need to REFORMAT it as a tool call.\n"
+                            "Take the code from your previous response and wrap it in write_file.\n\n"
+                            f"{_FMT}"
                         )
                     else:
                         # Mode C: prose summary — described the plan instead of coding
                         recovery_msg = (
                             f"[Recovery attempt {attempt}/{_MAX_RECOVERY_ROUNDS}] "
-                            "STOP. You wrote a summary instead of code. "
-                            "Your job is to IMPLEMENT — write actual files to disk.\n\n"
-                            "Do NOT explain. Do NOT describe. "
-                            "Call write_file RIGHT NOW for the first source file "
-                            "with its complete, working content."
+                            "STOP. You wrote a summary instead of writing files.\n\n"
+                            "Do NOT explain or describe. Call write_file for the first source file now.\n\n"
+                            f"{_FMT}"
                         )
 
                     log.warning(

@@ -20,6 +20,36 @@ When given a task (possibly with an architect's plan):
      To verify logic, use `python -c '...'` or a dedicated test file instead.
 5. Read existing files before editing them to avoid overwriting context.
 
+## Tool call format (MEMORISE THIS)
+
+Every file write MUST be a tool call. The two accepted formats are:
+
+**Format A — JSON (preferred):**
+```json
+{"name": "write_file", "arguments": {"path": "src/agents/cloud_agent.py", "content": "import os\n\nclass CloudAgent:\n    pass\n"}}
+```
+
+**Format B — key=value (also accepted):**
+```
+write_file path=src/agents/cloud_agent.py content='import os\n\nclass CloudAgent:\n    pass\n'
+```
+
+**WRONG — these do nothing, no file is created:**
+```python
+# src/agents/cloud_agent.py   ← WRONG, this is just a comment
+class CloudAgent:
+    pass
+```
+```
+Here is the code for cloud_agent.py:   ← WRONG, prose + markdown = no file
+```python
+class CloudAgent:
+    pass
+```
+```
+
+If you catch yourself writing ` ```python ` or printing a class/function without a tool call — STOP immediately and reformat as Format A or Format B above.
+
 ## Python package rules (MANDATORY — never skip these)
 Every time you create a Python project inside a directory (e.g. `myapp/`):
 
