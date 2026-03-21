@@ -150,6 +150,7 @@ class Agent:
         new_messages: list[Message] = []
         final_text = ""
         max_tool_rounds = 10  # safety limit
+        _files_written: set[str] = set()  # track paths written via tools this run
 
         for round_num in range(max_tool_rounds):
             log.debug("Tool loop round %d | role=%s", round_num, self.role_label)
@@ -168,46 +169,62 @@ class Agent:
             ))
 
             if not tool_calls_raw:
-                # Recovery: model dumped code as markdown instead of calling tools.
-                # Fire on ANY round (not just round 0) — a model can write 1-2 stub
-                # files then dump the rest as markdown on a later round.
-                # Limit to one recovery per session via _markdown_recovery_fired flag.
+                # Recovery: model failed to call any tools. Two distinct failure modes:
+                #   A) Code dump — response contains markdown code fences (``` blocks)
+                #   B) Summary/prose — response is analysis text with no code at all
+                # Both must be caught. Limit to one recovery attempt via flag.
                 if (
                     self.use_tools
-                    and "```" in text
                     and not getattr(self, "_markdown_recovery_fired", False)
                 ):
+                    has_code_fences = "```" in text
                     self._markdown_recovery_fired = True  # type: ignore[attr-defined]
-                    # Extract file paths mentioned in the markdown so the recovery
-                    # message can enumerate exactly what still needs to be written.
-                    _path_re = re.compile(
-                        r"(?m)^(?:#{1,4}\s+|>\s*\*\*)?([a-zA-Z0-9_\-./]+\.[a-z]{1,6})\b"
-                    )
-                    mentioned = list(dict.fromkeys(  # deduplicate, preserve order
-                        m.group(1) for m in _path_re.finditer(text)
-                        if "/" in m.group(1) or "." in m.group(1).rsplit("/", 1)[-1]
-                    ))[:20]  # cap at 20 files
-                    file_list = (
-                        "\n".join(f"  - {p}" for p in mentioned)
-                        if mentioned else "  (see your previous response for the full list)"
-                    )
-                    log.warning(
-                        "Tool-use failure: model output markdown code with no tool calls "
-                        "— injecting recovery prompt | role=%s round=%d chars=%d files_found=%d",
-                        self.role_label, round_num, len(text), len(mentioned),
-                    )
-                    raw.append({
-                        "role": "user",
-                        "content": (
+
+                    if has_code_fences:
+                        # Mode A: code dump — extract file paths so recovery is targeted
+                        _path_re = re.compile(
+                            r"(?m)^(?:#{1,4}\s+|>\s*\*\*)?([a-zA-Z0-9_\-./]+\.[a-z]{1,6})\b"
+                        )
+                        mentioned = list(dict.fromkeys(
+                            m.group(1) for m in _path_re.finditer(text)
+                            if "/" in m.group(1) or "." in m.group(1).rsplit("/", 1)[-1]
+                        ))[:20]
+                        file_list = (
+                            "\n".join(f"  - {p}" for p in mentioned)
+                            if mentioned else "  (see your previous response for the full list)"
+                        )
+                        recovery_msg = (
                             "STOP. Your response contained code in markdown — "
                             "that code does NOT exist on disk and the task is NOT complete.\n\n"
                             "You MUST call write_file or edit_file for EVERY file. "
                             f"Files still needed:\n{file_list}\n\n"
-                            "Call write_file for the first file RIGHT NOW with its complete content. "
-                            "Do not summarise or explain — just call the tool."
-                        ),
-                    })
+                            "Call write_file for the first file RIGHT NOW with its complete "
+                            "content. Do not summarise or explain — just call the tool."
+                        )
+                        log.warning(
+                            "Tool-use failure: code dump with no tool calls "
+                            "— injecting recovery | role=%s round=%d chars=%d files=%d",
+                            self.role_label, round_num, len(text), len(mentioned),
+                        )
+                    else:
+                        # Mode B: summary/prose — model read the spec and described it
+                        # instead of writing code. Point it directly at the first file.
+                        recovery_msg = (
+                            "STOP. You wrote a summary/analysis instead of code. "
+                            "Your job is to IMPLEMENT — write actual files to disk.\n\n"
+                            "Do NOT explain the plan. Do NOT describe what you will do. "
+                            "Call write_file RIGHT NOW for the first source file with its "
+                            "complete, working content. One tool call per file. Start immediately."
+                        )
+                        log.warning(
+                            "Tool-use failure: prose summary with no tool calls "
+                            "— injecting recovery | role=%s round=%d chars=%d",
+                            self.role_label, round_num, len(text),
+                        )
+
+                    raw.append({"role": "user", "content": recovery_msg})
                     continue  # retry with the targeted correction
+
                 log.debug("No tool calls — agentic loop complete | role=%s", self.role_label)
                 break  # No tool calls — we're done
 
@@ -228,6 +245,11 @@ class Agent:
 
                 result = execute_tool(fn_name, fn_args)
 
+                # Track which files were actually written this run
+                if fn_name in ("write_file", "edit_file") and "path" in fn_args:
+                    if not result.startswith("Error"):
+                        _files_written.add(fn_args["path"])
+
                 log.debug("TOOL RESULT | %s → %s", fn_name, _truncate(result, 1000))
 
                 if not silent:
@@ -237,9 +259,62 @@ class Agent:
                 raw.append(tool_msg)
                 new_messages.append(Message(role="tool", content=result))
 
+        # ── Last-resort code-block extractor ─────────────────────────────────
+        # If the loop ended with zero files written but the final response
+        # contains markdown code fences with a detectable file path, extract
+        # and write each block to disk. This catches models that stubbornly
+        # refuse to call write_file even after recovery prompts.
+        #
+        # Recognised header patterns (must appear on the line before the fence):
+        #   ### src/foo/bar.py
+        #   **src/foo/bar.py**
+        #   `src/foo/bar.py`
+        #   # path: src/foo/bar.py
+        if self.use_tools and not _files_written and "```" in final_text:
+            _hdr_re = re.compile(
+                r"(?m)^(?:#{1,4}\s+|>\s*\*\*|\*\*|`|# path:\s*)"
+                r"([a-zA-Z0-9_\-./]+\.[a-zA-Z0-9]{1,6})`?\**\s*$"
+            )
+            _fence_re = re.compile(r"```[a-zA-Z0-9]*\n(.*?)```", re.DOTALL)
+            lines = final_text.splitlines()
+            extracted = 0
+            for i, line in enumerate(lines):
+                m = _hdr_re.match(line.strip())
+                if not m:
+                    continue
+                path = m.group(1)
+                # Find the next code fence after this header line
+                rest = "\n".join(lines[i + 1:])
+                fm = _fence_re.search(rest)
+                if not fm:
+                    continue
+                content = fm.group(1)
+                if not content.strip():
+                    continue
+                try:
+                    from .tools.registry import execute_tool as _exec  # local import
+                except ImportError:
+                    from ..tools.registry import execute_tool as _exec  # type: ignore
+                write_result = _exec("write_file", {"path": path, "content": content})
+                if not write_result.startswith("Error"):
+                    _files_written.add(path)
+                    extracted += 1
+                    if not silent:
+                        from ..ui.console import print_info
+                        print_info(f"[dim]Extracted code block → wrote [cyan]{path}[/cyan][/dim]")
+                    log.warning(
+                        "Code-block extractor wrote file | path=%s chars=%d",
+                        path, len(content),
+                    )
+            if extracted:
+                log.info(
+                    "Code-block extractor rescued %d file(s) | role=%s",
+                    extracted, self.role_label,
+                )
+
         log.info(
-            "Agent run complete | role=%s response_chars=%d new_messages=%d",
-            self.role_label, len(final_text), len(new_messages),
+            "Agent run complete | role=%s response_chars=%d new_messages=%d files_written=%d",
+            self.role_label, len(final_text), len(new_messages), len(_files_written),
         )
         return final_text, new_messages
 
