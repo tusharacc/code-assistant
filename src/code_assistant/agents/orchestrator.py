@@ -85,12 +85,17 @@ class Orchestrator:
         pipeline_enabled: bool | None = None,
         rag_context: str | None = None,
         resume_pipeline: bool = False,
+        force_pipeline: bool = False,
     ) -> None:
         self.history = history
         self.debate_enabled = debate_enabled if debate_enabled is not None else config.debate_enabled
         self.pipeline_enabled = pipeline_enabled if pipeline_enabled is not None else config.use_pipeline
         self.rag_context = rag_context
         self.resume_pipeline = resume_pipeline
+        # When the --pipeline CLI flag is explicitly passed, we bypass intent classification
+        # so that req-file triggers ("Please implement everything in requirements.md") are
+        # never misclassified as "conversational" and silently dropped.
+        self.force_pipeline = force_pipeline
         self._architect: Agent | None = None
         self._implementer: Agent | None = None
 
@@ -118,7 +123,14 @@ class Orchestrator:
           3. conversational — question / explanation request → Architect
           4. single         — implementation task → Implementer
         """
-        intent = _classify_intent(user_input)
+        # When force_pipeline=True (set by the --pipeline CLI flag) we skip intent
+        # classification entirely: an explicit flag overrides any heuristic.  This
+        # prevents the 118-char req-file trigger from being misclassified as
+        # "conversational" and silently bypassing the pipeline.
+        if self.force_pipeline:
+            intent = "complex"
+        else:
+            intent = _classify_intent(user_input)
 
         is_complex         = intent == "complex"
         # Pipeline runs for any non-conversational task when explicitly enabled.

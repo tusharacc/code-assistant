@@ -155,13 +155,21 @@ SPEC_SLASH_HELP = """
 
 
 class REPL:
-    def __init__(self, resume: str | None = None, resume_pipeline: bool = False) -> None:
+    def __init__(
+        self,
+        resume: str | None = None,
+        resume_pipeline: bool = False,
+        force_pipeline: bool = False,
+    ) -> None:
         self.history = History()
         self.retriever: ContextProvider = CodebaseRetriever()
         self.ast_retriever = ASTRetriever()
         self.debate_enabled = config.debate_enabled
         self.pipeline_enabled = config.use_pipeline
         self.resume_pipeline = resume_pipeline
+        # True when --pipeline was explicitly passed on the CLI (not just config default).
+        # Forwarded to Orchestrator so it bypasses intent classification.
+        self.force_pipeline = force_pipeline
         self._log = get_logger(__name__)
         self._prompt_session: PromptSession = PromptSession(
             history=FileHistory(str(_PROMPT_HISTORY_FILE)),
@@ -272,6 +280,7 @@ class REPL:
             pipeline_enabled=self.pipeline_enabled,
             rag_context=rag_context,
             resume_pipeline=self.resume_pipeline,
+            force_pipeline=self.force_pipeline,
         )
         try:
             new_messages = orchestrator.run(text)
@@ -935,7 +944,7 @@ def main(
         spec_repl.run()
         return
 
-    repl = REPL(resume=resume, resume_pipeline=resume_pipeline)
+    repl = REPL(resume=resume, resume_pipeline=resume_pipeline, force_pipeline=bool(pipeline))
 
     # ── Load requirement document into context ───────────────────────
     initial_input: str | None = None
