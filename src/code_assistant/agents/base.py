@@ -149,8 +149,9 @@ class Agent:
 
         new_messages: list[Message] = []
         final_text = ""
-        max_tool_rounds = 10  # safety limit
+        max_tool_rounds = 20  # safety limit — raised from 10; complex multi-file projects need more rounds
         _files_written: set[str] = set()  # track paths written via tools this run
+        self._recovery_count = 0  # reset per-run so each agent.run() gets fresh recovery budget
 
         for round_num in range(max_tool_rounds):
             log.debug("Tool loop round %d | role=%s", round_num, self.role_label)
@@ -247,6 +248,7 @@ class Agent:
                 break  # No tool calls — we're done
 
             # Execute each tool call
+            _round_results: list[str] = []
             for tc in tool_calls_raw:
                 fn_name = tc["function"]["name"]
                 fn_args = tc["function"]["arguments"]
@@ -262,10 +264,11 @@ class Agent:
                     print_tool_call(fn_name, fn_args)
 
                 result = execute_tool(fn_name, fn_args)
+                _round_results.append(result)
 
                 # Track which files were actually written this run
                 if fn_name in ("write_file", "edit_file") and "path" in fn_args:
-                    if not result.startswith("Error"):
+                    if not result.startswith("Error") and not result.startswith("No changes"):
                         _files_written.add(fn_args["path"])
 
                 log.debug("TOOL RESULT | %s → %s", fn_name, _truncate(result, 1000))
@@ -276,6 +279,28 @@ class Agent:
                 tool_msg: dict = {"role": "tool", "content": result}
                 raw.append(tool_msg)
                 new_messages.append(Message(role="tool", content=result))
+
+            # ── No-progress detection ─────────────────────────────────────────
+            # If EVERY tool call this round returned "No changes" (identical
+            # content already on disk) the model is stuck in a write loop.
+            # Break out immediately so it doesn't repeat for all 20 rounds.
+            if _round_results and all(
+                r.startswith("No changes") for r in _round_results
+            ):
+                log.warning(
+                    "No-progress round detected: all %d tool call(s) returned "
+                    "'No changes' | role=%s round=%d — breaking loop",
+                    len(_round_results), self.role_label, round_num,
+                )
+                raw.append({
+                    "role": "user",
+                    "content": (
+                        "All files you attempted to write are already correct on disk "
+                        "— no changes were needed. Your task is complete. "
+                        "Stop calling tools."
+                    ),
+                })
+                break
 
         # ── Last-resort code-block extractor ─────────────────────────────────
         # If the loop ended with zero files written but the final response

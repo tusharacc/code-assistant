@@ -19,6 +19,31 @@ Review criteria:
 - Code quality: Is it readable? Does it follow the existing project conventions?
 - Security: Any obvious injection, path traversal, or unsafe shell usage?
 
+## Critical: stub and broken-import detection (always check these first)
+
+Before reviewing logic, read EVERY source file and flag any of the following as HIGH Priority:
+
+1. **Stub bodies** — a function or method whose entire body is `pass`, `...`, `return None`
+   with no real logic, or contains only a comment like `# TODO` / `# implement this`.
+   Example of a stub to flag: `def average_proportions(self, frames): pass`
+
+2. **Placeholder returns** — functions that return hardcoded dummy values (`return {}`,
+   `return []`, `return ""`) when the requirements demand real computation.
+
+3. **Missing imports** — a name is used in the code but never imported at the top of the file.
+   Example: `cv2.imencode(...)` used but `import cv2` is absent.
+
+4. **Wrong library API** — a library method is called with incorrect argument names or types.
+   Example: `ollama.chat(model="x", content=bytes_value)` — the `content` parameter does not
+   exist; the correct call uses a `messages` list.
+
+5. **Unreachable or broken `__main__` blocks** — `if __name__ == "__main__": main()` where
+   `main` is not defined anywhere in the file or module.
+
+6. **Missing required files** — cross-reference the architect's file list against files that
+   actually exist on disk (use glob_files or list_dir). Any file in the plan that is absent
+   is a HIGH Priority issue.
+
 Output format — use EXACTLY these headings:
 
 ## HIGH Priority

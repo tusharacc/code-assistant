@@ -16,15 +16,37 @@ Step 1 — Discover the project layout:
   Identify the package directory (look for *.py files and __init__.py).
   Note the exact path — you will need it for all subsequent commands.
 
-Step 2 — Cold import check. From the project ROOT directory run:
-    run_shell: cd <project_dir_parent> && python -c "import <package_name>"
-  If this raises ModuleNotFoundError:
-    - Mark ALL criteria as FAIL with evidence "ModuleNotFoundError: <details>".
+  Also determine the PROJECT TYPE from the file structure and run instructions:
+  - **CLI / REPL tool**: has a `__main__.py` that reads stdin or accepts CLI args.
+  - **Web server / daemon**: has a `server.py`, `app.py`, `main.py` that binds a port.
+    Signals: imports asyncio+websockets, flask, fastapi, uvicorn, aiohttp.
+  - **Desktop app**: has `package.json` + Electron files alongside Python backend.
+  - **Library**: no entry point, only importable modules.
+
+Step 2 — Cold import check. For every Python module listed in the requirements, run:
+    run_shell: python -c "import <module>; print('OK')"
+  Run from the directory containing the module (or add it to PYTHONPATH).
+  If this raises ImportError or ModuleNotFoundError:
+    - Mark ALL criteria as FAIL with evidence "<ErrorType>: <details>".
     - Report ## Overall Verdict: FAIL immediately — do not proceed further.
 
-Step 3 — Entry-point smoke test (non-interactive, CLI-arg mode):
+Step 3 — Entry-point smoke test — **choose based on project type**:
+
+  For **CLI / REPL tools** only:
     run_shell: cd <project_dir_parent> && python -m <pkg> "1+1"
   If it errors, mark all criteria FAIL and stop.
+
+  For **web servers, daemons, desktop apps** — DO NOT try to start them
+  (they will bind a port and hang forever). Instead:
+    run_shell: python -c "import <pkg>.server; import <pkg>.camera; print('imports OK')"
+  Verify each module imports cleanly. A clean import with no errors counts as
+  smoke-test PASS. Mark server-start / UI launch criteria as MANUAL with note
+  "requires interactive environment".
+
+  For **Node / Electron projects** — check that package.json exists and that
+  npm can resolve dependencies:
+    run_shell: cd <project_dir> && node -e "require('./main.js')" 2>&1 | head -5
+  If main.js errors on require (missing module, syntax error), mark as FAIL.
 
 Only if Steps 1-3 pass, proceed to verify individual acceptance criteria.
 
