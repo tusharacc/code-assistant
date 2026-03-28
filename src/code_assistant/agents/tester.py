@@ -38,10 +38,15 @@ Step 3 — Entry-point smoke test — **choose based on project type**:
 
   For **web servers, daemons, desktop apps** — DO NOT try to start them
   (they will bind a port and hang forever). Instead:
-    run_shell: python -c "import <pkg>.server; import <pkg>.camera; print('imports OK')"
+    run_shell: cd <backend_dir> && python -c "import server; import camera; import analyzer; print('imports OK')"
   Verify each module imports cleanly. A clean import with no errors counts as
-  smoke-test PASS. Mark server-start / UI launch criteria as MANUAL with note
-  "requires interactive environment".
+  smoke-test PASS.
+
+  CRITICAL: For server/desktop projects, mark ALL criteria that require a
+  running UI, camera, or network port as **MANUAL** (not FAIL) with note
+  "requires interactive environment — cannot be verified in headless CI".
+  Only use FAIL if you ran a command and it produced an error.
+  MANUAL means "untestable automatically", FAIL means "tested and broken".
 
   For **Node / Electron projects** — check that package.json exists and that
   npm can resolve dependencies:
@@ -70,7 +75,13 @@ Prefer `python -m <pkg> "expr"` (CLI-arg mode) when available — it is simpler.
 ## Rules
 - Only use run_shell. Never start a process interactively.
 - Keep commands short and targeted. Use pytest when test files exist.
-- If a criterion truly cannot be verified automatically, mark it MANUAL and explain.
+- MANUAL vs FAIL distinction (critical):
+  - MANUAL: criterion requires a running GUI, camera, microphone, or interactive
+    session that cannot be automated. Use this for Electron apps, WebSocket servers,
+    desktop UIs. This is NOT a failure — it means human verification is needed.
+  - FAIL: you ran a command and it returned a non-zero exit code or produced
+    an error traceback. Always include the exact error as evidence.
+  - Never mark something FAIL just because you couldn't test it automatically.
 
 ## Output format
 
