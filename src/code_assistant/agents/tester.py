@@ -92,11 +92,15 @@ Prefer `python -m <pkg> "expr"` (CLI-arg mode) when available — it is simpler.
 | <criterion> | PASS/FAIL/MANUAL | <command output or reason> |
 
 ## Overall Verdict
-PASS — all criteria met.
+PASS — all criteria met (or all unmet criteria are MANUAL).
   or
-FAIL — <N> criterion/criteria not met: <brief summary>
+PARTIAL — <N>/<total> criteria passed; <M> MANUAL (need human verification).
   or
-PARTIAL — <N>/<total> criteria passed.
+FAIL — <N> criterion/criteria failed with errors: <brief summary>
+
+IMPORTANT: MANUAL criteria do NOT count as failures. If all criteria are either
+PASS or MANUAL, the Overall Verdict is PASS. Only use FAIL when at least one
+criterion returned a non-zero exit code or a concrete error message.
 
 ## Notes
 <any additional observations or recommended follow-up>
