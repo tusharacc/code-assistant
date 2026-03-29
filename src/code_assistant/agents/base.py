@@ -152,6 +152,13 @@ class Agent:
         max_tool_rounds = 20  # safety limit — raised from 10; complex multi-file projects need more rounds
         _files_written: set[str] = set()  # track paths written via tools this run
         self._recovery_count = 0  # reset per-run so each agent.run() gets fresh recovery budget
+        # Track whether this run has already executed at least one tool call.
+        # Once _had_tool_calls is True, a prose-only response is the agent's
+        # legitimate final answer (e.g. a reviewer outputting its findings after
+        # reading all the files).  Recovery must NOT fire in that case — it would
+        # misclassify a review that mentions "def " / "class " as a raw-code dump
+        # and send a confusing "reformat as tool calls" prompt.
+        _had_tool_calls = False
 
         for round_num in range(max_tool_rounds):
             log.debug("Tool loop round %d | role=%s", round_num, self.role_label)
@@ -176,9 +183,16 @@ class Agent:
                 #   B) Raw code     — response has indented/bare code but no backticks
                 #   C) Prose/summary — model described the plan instead of writing it
                 # Allow up to _MAX_RECOVERY_ROUNDS attempts with escalating urgency.
+                #
+                # IMPORTANT: skip recovery entirely if the agent has already executed
+                # tool calls this run.  A prose response AFTER tool use is the
+                # agent's legitimate final answer (e.g. a reviewer that just finished
+                # reading files and is now outputting structured findings — its review
+                # text will contain code keywords like "def " / "class " that would
+                # otherwise trigger the raw-code recovery path incorrectly).
                 _recovery_count = getattr(self, "_recovery_count", 0)
                 _MAX_RECOVERY_ROUNDS = 3
-                if self.use_tools and _recovery_count < _MAX_RECOVERY_ROUNDS:
+                if self.use_tools and _recovery_count < _MAX_RECOVERY_ROUNDS and not _had_tool_calls:
                     self._recovery_count = _recovery_count + 1  # type: ignore[attr-defined]
                     attempt = self._recovery_count  # 1, 2, or 3
 
@@ -248,6 +262,7 @@ class Agent:
                 break  # No tool calls — we're done
 
             # Execute each tool call
+            _had_tool_calls = True
             _round_results: list[str] = []
             for tc in tool_calls_raw:
                 fn_name = tc["function"]["name"]

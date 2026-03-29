@@ -956,8 +956,23 @@ class Pipeline:
             state.review_history, rag_context=self.rag_context
         )
         state.review_history.extend(new_msgs)
-        state.review_findings = review_text
 
+        # `review_text` is the last model turn's text content.  If the reviewer's
+        # final turn was a pure tool call (e.g. write_file with no accompanying text),
+        # review_text will be "".  Fall back to the last substantial assistant message
+        # in new_msgs so findings are never silently discarded.
+        if not review_text.strip():
+            for msg in reversed(new_msgs):
+                if msg.role == "assistant" and len(msg.content.strip()) > 80:
+                    review_text = msg.content
+                    log.info(
+                        "Phase 3 (reviewer): empty final_text — recovered %d chars "
+                        "from last substantial assistant message",
+                        len(review_text),
+                    )
+                    break
+
+        state.review_findings = review_text
         log.info("Phase 3 (reviewer) complete | findings_chars=%d", len(review_text))
         return new_msgs
 
@@ -1109,6 +1124,21 @@ class Pipeline:
             test_text, retry_msgs = tester.run(state.test_history, rag_context=self.rag_context)
             state.test_history.extend(retry_msgs)
             new_msgs = new_msgs + [recovery] + retry_msgs
+
+        # `test_text` is the last model turn's text content.  If the final turn
+        # was a pure tool call (run_shell), test_text will be "".  Fall back to
+        # the last substantial assistant message so results are never discarded.
+        if not test_text.strip():
+            all_msgs_for_fallback = new_msgs
+            for msg in reversed(all_msgs_for_fallback):
+                if msg.role == "assistant" and len(msg.content.strip()) > 80:
+                    test_text = msg.content
+                    log.info(
+                        "Tester round %d: empty final_text — recovered %d chars "
+                        "from last substantial assistant message",
+                        round_num + 1, len(test_text),
+                    )
+                    break
 
         state.test_results = test_text
         log.info(
