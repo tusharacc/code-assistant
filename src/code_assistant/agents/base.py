@@ -527,7 +527,13 @@ def _try_parse_text_tool_calls(text: str) -> list[dict]:
         try:
             parsed = json.loads(block)
         except json.JSONDecodeError:
-            continue
+            # Some models embed literal unescaped newlines/tabs inside JSON string
+            # values (e.g. README content with a bare newline mid-string), which is
+            # invalid JSON. Normalize control characters inside strings and retry.
+            try:
+                parsed = json.loads(_normalize_json_control_chars(block))
+            except json.JSONDecodeError:
+                continue
 
         items = parsed if isinstance(parsed, list) else [parsed]
         for item in items:
@@ -646,6 +652,42 @@ def _try_parse_kv_tool_calls(text: str) -> list[dict]:
             result.append({"function": {"name": tool_name, "arguments": args}})
 
     return result
+
+
+def _normalize_json_control_chars(s: str) -> str:
+    """
+    Replace literal (unescaped) control characters — newline, carriage-return,
+    tab — with their JSON escape sequences, but ONLY when they appear inside a
+    JSON string value.
+
+    Some model variants emit write_file calls whose `content` field contains a
+    literal newline mid-string (e.g. a README with an unindented bullet right
+    after a heading).  json.loads() rejects those because RFC 8259 §7 forbids
+    unescaped U+000A/U+000D/U+0009 inside strings.  This pre-pass fixes them so
+    the JSON can still be parsed and the tool call executed correctly.
+    """
+    result: list[str] = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+        elif ch == "\\" and in_string:
+            result.append(ch)
+            escape_next = True
+        elif ch == '"':
+            result.append(ch)
+            in_string = not in_string
+        elif in_string and ch == "\n":
+            result.append("\\n")
+        elif in_string and ch == "\r":
+            result.append("\\r")
+        elif in_string and ch == "\t":
+            result.append("\\t")
+        else:
+            result.append(ch)
+    return "".join(result)
 
 
 def _extract_json_objects(text: str):
