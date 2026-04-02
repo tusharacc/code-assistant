@@ -362,6 +362,45 @@ class Pipeline:
         except Exception as _e:
             log.warning("Few-shot enrichment failed (non-fatal): %s", _e)
 
+        # ── Pre-pipeline git checkpoint ──────────────────────────────────
+        # Snapshot all uncommitted changes before the pipeline modifies any files.
+        # If the pipeline makes bad changes, `git reset --hard HEAD~1` restores
+        # the exact state the workspace was in before this run.
+        try:
+            import subprocess as _sp
+            _git_status = _sp.run(
+                ["git", "status", "--porcelain"],
+                capture_output=True, text=True, cwd=str(_Path.cwd()),
+            )
+            if _git_status.returncode == 0 and _git_status.stdout.strip():
+                # There are uncommitted changes — snapshot them
+                _sp.run(["git", "add", "-A"], cwd=str(_Path.cwd()), capture_output=True)
+                _commit_msg = (
+                    f"ca: pre-pipeline checkpoint\n\n"
+                    f"Task: {user_task[:120]}\n"
+                    f"Run: {_run_ts}\n\n"
+                    f"Auto-committed by ca pipeline before phase 1.\n"
+                    f"To revert: git reset --hard HEAD~1"
+                )
+                _commit_result = _sp.run(
+                    ["git", "commit", "-m", _commit_msg],
+                    capture_output=True, text=True, cwd=str(_Path.cwd()),
+                )
+                if _commit_result.returncode == 0:
+                    log.info("Pre-pipeline git checkpoint created — revert: git reset --hard HEAD~1")
+                    print_info("Git checkpoint created (revert: git reset --hard HEAD~1)")
+                else:
+                    log.warning(
+                        "Pre-pipeline git commit failed (non-fatal): %s",
+                        _commit_result.stderr.strip()
+                    )
+            elif _git_status.returncode == 0:
+                log.info("Pre-pipeline git checkpoint: nothing to commit (clean working tree)")
+            else:
+                log.warning("Pre-pipeline git checkpoint: git not available or not a repo (non-fatal)")
+        except Exception as _git_err:
+            log.warning("Pre-pipeline git checkpoint failed (non-fatal): %s", _git_err)
+
         t0 = time.perf_counter()
 
         # ── Phase 1: Architect ───────────────────────────────────────────
@@ -428,6 +467,21 @@ class Pipeline:
                 return all_messages
 
             log.info("Implementer gate passed | files=%d", _impl_verify.file_count)
+
+            # Post-implementer git snapshot — captures what was written before the
+            # reviewer/fix phases run. Enables: git diff HEAD~1 to see what impl wrote.
+            try:
+                import subprocess as _sp2
+                _sp2.run(["git", "add", "-A"], cwd=str(_Path.cwd()), capture_output=True)
+                _sp2.run(
+                    ["git", "commit", "-m",
+                     f"ca: phase 2 implementer output\n\nTask: {user_task[:100]}\nRun: {_run_ts}"],
+                    capture_output=True, cwd=str(_Path.cwd()),
+                )
+                log.info("Post-implementer git snapshot committed")
+            except Exception as _gce:
+                log.debug("Post-implementer git snapshot skipped: %s", _gce)
+
         else:
             print_info("↷ Phase 2 (implementer) — skipped (files already on disk)")
             log.info("Resume: skipping phase 2")
@@ -563,6 +617,18 @@ class Pipeline:
                         "Fix phase verification failed (non-halting) | missing=%s mismatched=%s",
                         _fix_verify.missing, _fix_verify.mismatched,
                     )
+                # Post-fix git snapshot — captures what the fix phase changed
+                try:
+                    import subprocess as _sp3
+                    _sp3.run(["git", "add", "-A"], cwd=str(_Path.cwd()), capture_output=True)
+                    _sp3.run(
+                        ["git", "commit", "-m",
+                         f"ca: phase 4 fix output\n\nTask: {user_task[:100]}\nRun: {_run_ts}"],
+                        capture_output=True, cwd=str(_Path.cwd()),
+                    )
+                    log.info("Post-fix git snapshot committed")
+                except Exception as _gce2:
+                    log.debug("Post-fix git snapshot skipped: %s", _gce2)
             else:
                 print_info("No HIGH/MEDIUM issues — skipping fix phase.")
                 log.info("Pipeline: no HIGH/MEDIUM findings, skipping fix phase")
@@ -1027,9 +1093,12 @@ class Pipeline:
         )
         state.impl_history.append(Message(role="user", content=fix_prompt))
 
-        fix_text, new_msgs = impl.run(
-            state.impl_history, rag_context=self.rag_context
-        )
+        # Use a focused 2-message history instead of the full accumulated impl_history.
+        # The full history can exceed context limits after a large Phase 2 run.
+        # The original task message (impl_history[0]) gives the implementer enough
+        # context; it can read any file it needs via read_file.
+        focused = [state.impl_history[0], state.impl_history[-1]]
+        fix_text, new_msgs = impl.run(focused, rag_context=self.rag_context)
         state.impl_history.extend(new_msgs)
 
         log.info("Phase 4 (implementer fix) complete | response_chars=%d", len(fix_text))
@@ -1051,7 +1120,10 @@ class Pipeline:
             ),
         )
         state.impl_history.append(run_q)
-        run_text, run_msgs = impl.run(state.impl_history, rag_context=self.rag_context)
+        # Focused history: task context + the run question. Full history risks
+        # overflowing context; the implementer can list_dir/read_file as needed.
+        focused = [state.impl_history[0], state.impl_history[-1]]
+        run_text, run_msgs = impl.run(focused, rag_context=self.rag_context)
         state.impl_history.extend(run_msgs)
         state.run_instructions = run_text
         log.info("Gathered run instructions | chars=%d", len(run_text))
@@ -1166,7 +1238,10 @@ class Pipeline:
         )
         state.impl_history.append(Message(role="user", content=fix_prompt))
 
-        fix_text, new_msgs = impl.run(state.impl_history, rag_context=self.rag_context)
+        # Focused history — same rationale as _phase_fix: avoids context overflow
+        # after a large impl + test run while still giving the implementer the task.
+        focused = [state.impl_history[0], state.impl_history[-1]]
+        fix_text, new_msgs = impl.run(focused, rag_context=self.rag_context)
         state.impl_history.extend(new_msgs)
 
         log.info(

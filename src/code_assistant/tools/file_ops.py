@@ -39,9 +39,66 @@ def read_file(path: str) -> str:
         return f"Error reading {path}: {e}"
 
 
-def write_file(path: str, content: str) -> str:
-    """Create or overwrite a file. Shows diff if file exists, asks for confirmation."""
-    log.info("write_file | path=%s chars=%d", path, len(content))
+def _regression_guard(path: str, original: str, new_content: str) -> str | None:
+    """Return an error string if the new content is a suspicious regression.
+
+    Triggers when BOTH of the following are true:
+      - The file shrinks by more than SHRINK_THRESHOLD (60%)
+      - The original file was at least MIN_ORIGINAL_LINES lines long
+
+    This catches the most common pipeline failure mode: a write_file call that
+    replaces a 200-line working file with a 1-line stub or blank import.
+
+    Returns None if the write looks safe.
+    Returns an Error string (starts with "Error:") if the guard fires.
+    Pass force_overwrite=True to bypass the guard for legitimate large rewrites
+    (e.g. generated files, complete refactors).
+    """
+    SHRINK_THRESHOLD   = 0.60   # 60% character reduction triggers the guard
+    MIN_ORIGINAL_LINES = 10     # only guard files that had meaningful content
+
+    orig_chars = len(original)
+    new_chars  = len(new_content)
+
+    if orig_chars == 0:
+        return None  # new file — nothing to protect
+
+    orig_lines = original.count("\n") + 1
+    if orig_lines < MIN_ORIGINAL_LINES:
+        return None  # original was a stub itself — no protection needed
+
+    shrink = (orig_chars - new_chars) / orig_chars
+    if shrink > SHRINK_THRESHOLD:
+        pct = int(shrink * 100)
+        log.error(
+            "write_file | REGRESSION GUARD fired: %s shrinks %d→%d chars (%d%%) "
+            "— use force_overwrite=True to bypass",
+            path, orig_chars, new_chars, pct,
+        )
+        return (
+            f"Error: regression guard blocked write to {path}.\n"
+            f"  Original: {orig_chars:,} chars ({orig_lines} lines)\n"
+            f"  New content: {new_chars:,} chars ({new_content.count(chr(10)) + 1} lines)\n"
+            f"  Reduction: {pct}% — exceeds the 60% safety threshold.\n\n"
+            f"This usually means write_file is being called with an incomplete or stub "
+            f"implementation that would destroy working code.\n\n"
+            f"If this is intentional (e.g. complete refactor, generated file), "
+            f"call write_file again with force_overwrite=true to bypass the guard."
+        )
+    return None
+
+
+def write_file(path: str, content: str, force_overwrite: bool = False) -> str:
+    """Create or overwrite a file. Shows diff if file exists, asks for confirmation.
+
+    The regression guard blocks any write that would shrink an existing file by
+    more than 60%, preventing pipeline phases from replacing working code with
+    stubs. Pass force_overwrite=True to bypass for legitimate large rewrites.
+    """
+    log.info(
+        "write_file | path=%s chars=%d force_overwrite=%s",
+        path, len(content), force_overwrite,
+    )
     try:
         p = Path(path).expanduser().resolve()
         original = ""
@@ -50,6 +107,15 @@ def write_file(path: str, content: str) -> str:
         if p.exists():
             original = p.read_text(encoding="utf-8", errors="replace")
             verb = "overwrite"
+
+            # ── Regression guard ─────────────────────────────────────────────
+            if not force_overwrite:
+                guard_error = _regression_guard(path, original, content)
+                if guard_error:
+                    from ..ui.console import print_error as _pe
+                    _pe(guard_error.replace("Error: ", ""))
+                    return guard_error
+
             changed = print_diff(str(p), original, content)
             if not changed:
                 log.debug("write_file | no changes to %s", path)

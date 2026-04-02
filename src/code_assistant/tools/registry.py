@@ -14,6 +14,14 @@ ALL_HANDLERS = {**FILE_HANDLERS, **SHELL_HANDLERS, **RAG_HANDLERS, **AST_HANDLER
 _TOOL_SCHEMAS: list[dict] | None = None
 
 
+def reset_tool_schemas() -> None:
+    """Force schema rebuild on next get_tool_schemas() call.
+    Needed in tests that toggle config flags like web_search_enabled.
+    """
+    global _TOOL_SCHEMAS
+    _TOOL_SCHEMAS = None
+
+
 def get_tool_schemas() -> list[dict]:
     """Return tool definitions in Ollama / OpenAI function-calling format.
     Built once and cached — schemas are constant at runtime.
@@ -52,7 +60,12 @@ def get_tool_schemas() -> list[dict]:
                 "name": "write_file",
                 "description": (
                     "Write content to a file, creating it or overwriting it. "
-                    "Shows a diff and asks the user for confirmation first."
+                    "Shows a diff and asks the user for confirmation first. "
+                    "A regression guard blocks overwrites that shrink an existing file "
+                    "by more than 60% — this prevents accidentally replacing working code "
+                    "with stubs. If you are doing a legitimate large rewrite (complete "
+                    "refactor, generated file, intentional simplification), set "
+                    "force_overwrite=true to bypass the guard."
                 ),
                 "parameters": {
                     "type": "object",
@@ -64,6 +77,15 @@ def get_tool_schemas() -> list[dict]:
                         "content": {
                             "type": "string",
                             "description": "Full content to write to the file.",
+                        },
+                        "force_overwrite": {
+                            "type": "boolean",
+                            "description": (
+                                "Set to true to bypass the regression guard. "
+                                "Only use when you are intentionally replacing a large "
+                                "file with a much smaller one (refactor, generated output). "
+                                "Default: false."
+                            ),
                         },
                     },
                     "required": ["path", "content"],

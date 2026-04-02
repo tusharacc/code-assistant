@@ -19,6 +19,10 @@ When given a task (possibly with an architect's plan):
    - Never run programs that block on stdin (e.g. `python app.py`, interactive REPLs).
      To verify logic, use `python -c '...'` or a dedicated test file instead.
 5. Read existing files before editing them to avoid overwriting context.
+6. **NEVER replace an entire existing file when only part of it needs changing.**
+   Use edit_file for targeted changes. Only call write_file on an existing file
+   if you truly need to rewrite the whole thing — and if the result is much shorter
+   than the original, set force_overwrite=true to confirm this is intentional.
 
 ## Tool call format (MEMORISE THIS)
 
@@ -129,6 +133,57 @@ result URL to read the full page. Never guess or construct URLs — only use URL
 returned by search or provided by the user.
 
 Never call `web_search` or `fetch_url` for questions answerable from the local codebase.
+
+## Regression guard (write_file safety net)
+
+`write_file` has a built-in regression guard: if the new content is more than 60%
+smaller than the existing file, it is **automatically blocked** and returns an Error.
+This prevents the most common pipeline failure mode — a write_file that replaces a
+200-line working file with a 1-line stub.
+
+**What to do when you get a regression guard Error:**
+- Re-read the file (`read_file`), understand its structure, then make targeted edits
+  using `edit_file` for each change needed.
+- If you truly need to rewrite the whole file (complete refactor, generated output),
+  call `write_file` again with `force_overwrite=true`.
+- **NEVER call write_file with force_overwrite=true on a file you haven't read first.**
+
+## Known library pitfalls
+
+### ollama Python SDK
+- `ollama.chat()` has NO `system=` parameter. Passing it raises TypeError which broad
+  `except Exception` clauses silently swallow — every call returns the fallback value,
+  masking the bug entirely. The model will always return "unknown" / empty results.
+  CORRECT: pass system prompt as the first message in the list:
+      messages=[{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": "...", "images": [b64]}]
+
+### asyncio + blocking I/O
+- NEVER call blocking functions directly inside an async coroutine. This freezes the
+  entire event loop — all other coroutines (websocket I/O, timers, frame sending) stall
+  for the full duration. Affected calls: Ollama inference, SQLite queries, file reads,
+  subprocess.run(), requests.get(), any network I/O using a sync client.
+  CORRECT: wrap in run_in_executor:
+      loop = asyncio.get_running_loop()
+      result = await loop.run_in_executor(None, blocking_fn, arg1, arg2)
+
+### mediapipe 0.10+ Tasks API
+- `mp.solutions` was removed entirely. Use `mediapipe.tasks.python.vision` (Tasks API).
+- Segmentation masks: `result.segmentation_masks[0].numpy_view()` returns shape
+  `(H, W, 1)`, NOT `(H, W)`. Adding `[..., np.newaxis]` produces `(H, W, 1, 1)` which
+  cannot broadcast against a `(H, W, 3)` frame → numpy raises at runtime.
+  CORRECT: squeeze first: `mask = result.segmentation_masks[0].numpy_view().squeeze()`
+
+### HTML canvas in CSS flexbox / grid
+- Setting `canvas.width = <large number>` (e.g. 1920) makes the canvas's intrinsic CSS
+  size 1920 px. The default `min-width: auto` on flex/grid items prevents shrinking below
+  that, causing the canvas to overflow the container and clip off-screen.
+  ALWAYS add `min-width: 0; min-height: 0;` to any `<canvas>` inside a flex or grid container.
+
+### numpy / opencv version compatibility
+- `pip install mediapipe` pulls numpy 2.x. `opencv-python < 4.10` requires numpy 1.x
+  and will crash on import with "numpy.core.multiarray failed to import".
+  Pin both when using together: `pip install "numpy<2" "opencv-python<4.10"`
 """
 
 
