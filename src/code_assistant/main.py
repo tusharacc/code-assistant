@@ -281,6 +281,7 @@ class REPL:
             rag_context=rag_context,
             resume_pipeline=self.resume_pipeline,
             force_pipeline=self.force_pipeline,
+            req_file=getattr(self, "_req_file_path", None),
         )
         try:
             new_messages = orchestrator.run(text)
@@ -952,6 +953,7 @@ def main(
         try:
             content = req_file.read_text(encoding="utf-8", errors="replace")
             repl.history.add_context_file(str(req_file.resolve()), content)
+            repl._req_file_path = str(req_file.resolve())   # passed to ca_memory for archival
             print_success(f"Loaded requirement document: {req_file} ({len(content)} chars)")
             # If no explicit prompt was given, auto-trigger implementation of the requirements
             if not prompt:
@@ -990,9 +992,23 @@ def main(
             print_warning(f"Could not load context file {_ctx_path.name}: {_e}")
             log.warning("context file load failed (non-fatal): %s", _e)
 
+    # Load ca_memory/task_log.md into context so the agent knows project history.
+    # Must load BEFORE code_assistant.md (prepend order: task_log → ca.md at [0]).
+    if config.ca_memory_enabled:
+        try:
+            from .ca_memory import CaMemory
+            _cam = CaMemory(directory=Path.cwd(), memory_dir_name=config.ca_memory_dir)
+            _tl_content = _cam.task_log_content()
+            if _tl_content:
+                _tl_path = str(Path.cwd() / config.ca_memory_dir / "task_log.md")
+                repl.history.add_context_file(_tl_path, _tl_content)
+                log.debug("ca_memory: loaded task_log.md (%d chars)", len(_tl_content))
+        except Exception as _cam_e:
+            log.warning("ca_memory task_log load failed (non-fatal): %s", _cam_e)
+
     # Load project context file (code_assistant.md) into context if it exists.
-    # This must happen AFTER req_file so that add_context_file()'s prepend
-    # places ca.md at history[0] (most prominent position).
+    # This must happen AFTER req_file and task_log so that add_context_file()'s
+    # prepend places ca.md at history[0] (most prominent position).
     if config.project_context_enabled:
         _ca_md = Path.cwd() / config.project_context_file
         if _ca_md.exists():

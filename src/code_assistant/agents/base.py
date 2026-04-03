@@ -288,6 +288,15 @@ class Agent:
 
                 log.debug("TOOL RESULT | %s → %s", fn_name, _truncate(result, 1000))
 
+                # Cap large tool results to prevent context overflow.
+                # Errors and short results are passed through in full.
+                _MAX_TOOL_RESULT = 8000
+                if len(result) > _MAX_TOOL_RESULT and not result.startswith("Error"):
+                    result = (
+                        result[:_MAX_TOOL_RESULT]
+                        + f"\n… [truncated: {len(result) - _MAX_TOOL_RESULT:,} chars omitted to save context]"
+                    )
+
                 if not silent:
                     print_tool_result(fn_name, result)
 

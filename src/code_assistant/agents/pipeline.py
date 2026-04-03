@@ -150,10 +150,13 @@ class Pipeline:
         rag_context: str | None = None,
         initial_history: list[Message] | None = None,
         resume: bool = False,
+        req_file: str | None = None,
     ) -> None:
         self.rag_context = rag_context
         self.initial_history: list[Message] = initial_history or []
         self.resume = resume
+        # Path to the --req-file used to launch this run; archived in ca_memory/
+        self.req_file: str | None = req_file
         # Populated by run() — keyed by phase name, plus "elapsed_total"
         self.metrics: dict = {}
         # Preserved after run() for feedback collection; None before first run
@@ -362,6 +365,24 @@ class Pipeline:
         except Exception as _e:
             log.warning("Few-shot enrichment failed (non-fatal): %s", _e)
 
+        # ── ca_memory: pre-run file snapshot ─────────────────────────────
+        # Capture the state of all source files BEFORE the implementer writes anything.
+        # This is injected into the reviewer prompt so it knows which files are
+        # pre-existing (treat as ground truth) vs newly created (review thoroughly).
+        _ca_mem = None
+        _pre_snap: dict = {}
+        try:
+            if config.ca_memory_enabled:
+                from ..ca_memory import CaMemory
+                _ca_mem = CaMemory(
+                    directory=_Path.cwd(),
+                    memory_dir_name=config.ca_memory_dir,
+                )
+                _pre_snap = _ca_mem.snapshot_files()
+                log.info("ca_memory: pre-run snapshot captured (%d files)", len(_pre_snap))
+        except Exception as _mem_err:
+            log.warning("ca_memory pre-snapshot failed (non-fatal): %s", _mem_err)
+
         # ── Pre-pipeline git checkpoint ──────────────────────────────────
         # Snapshot all uncommitted changes before the pipeline modifies any files.
         # If the pipeline makes bad changes, `git reset --hard HEAD~1` restores
@@ -494,7 +515,7 @@ class Pipeline:
             print_rule("pipeline · phase 3 · reviewer", style="dim yellow")
             t = time.perf_counter()
             before = _snap(reviewer)
-            all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
+            all_messages.extend(self._phase_reviewer(user_task, state, reviewer, _ca_mem, _pre_snap))
             self.metrics["reviewer"] = _phase_metrics(reviewer, before, time.perf_counter() - t)
 
             # Artifact: review findings
@@ -559,7 +580,7 @@ class Pipeline:
                 )
                 t = time.perf_counter()
                 before = _snap(reviewer)
-                all_messages.extend(self._phase_reviewer(user_task, state, reviewer))
+                all_messages.extend(self._phase_reviewer(user_task, state, reviewer, _ca_mem, _pre_snap))
                 self.metrics[f"reviewer_recheck_round{phantom_round + 1}"] = _phase_metrics(
                     reviewer, before, time.perf_counter() - t
                 )
@@ -812,6 +833,27 @@ class Pipeline:
         except Exception as _e:
             log.warning("project_context update failed (non-fatal): %s", _e)
 
+        # ── ca_memory update ─────────────────────────────────────────────
+        # Append to task_log.md, update file_registry.md, archive req file.
+        # Errors are non-fatal.
+        try:
+            if config.ca_memory_enabled and _ca_mem is not None:
+                from pathlib import Path as _Path
+                from ..ca_memory import CaMemory
+                _post_snap = _ca_mem.snapshot_files()
+                from ..project_context import _parse_test_verdict
+                _outcome = _parse_test_verdict(state.test_results)
+                _ca_mem.update_from_pipeline(
+                    task=user_task,
+                    req_file_path=self.req_file,
+                    pre_snap=_pre_snap,
+                    post_snap=_post_snap,
+                    outcome=_outcome,
+                )
+                log.info("ca_memory: updated task_log + file_registry (outcome=%s)", _outcome)
+        except Exception as _mem_post_err:
+            log.warning("ca_memory post-run update failed (non-fatal): %s", _mem_post_err)
+
         # ── Update .ca_pipeline/latest symlink to this run's artifacts ───
         try:
             from pathlib import Path as _Path
@@ -992,22 +1034,47 @@ class Pipeline:
         return all_new
 
     def _phase_reviewer(
-        self, user_task: str, state: PipelineState, reviewer: Agent
+        self,
+        user_task: str,
+        state: PipelineState,
+        reviewer: Agent,
+        ca_mem=None,
+        pre_snap: dict | None = None,
     ) -> list[Message]:
-        """Reviewer inspects the implementation and produces structured findings."""
+        """Reviewer inspects the implementation and produces structured findings.
+
+        ca_mem and pre_snap are used to inject codebase history context so the
+        reviewer knows which files pre-existed this run (treat as ground truth)
+        vs which files the implementer created/modified (review thoroughly).
+        """
         impl_summary = _last_assistant_text(state.impl_history)
 
+        # Build codebase history block from ca_memory if available
+        history_block = ""
+        if ca_mem is not None and pre_snap is not None:
+            try:
+                post_snap = ca_mem.snapshot_files()
+                history_block = ca_mem.format_reviewer_context(pre_snap, post_snap)
+                log.info("_phase_reviewer: injecting ca_memory history context into reviewer prompt")
+            except Exception as _hb_err:
+                log.warning("_phase_reviewer: ca_memory context failed (non-fatal): %s", _hb_err)
+
+        history_prefix = (history_block + "\n\n---\n\n") if history_block else ""
+
         prompt = (
-            f"Task that was given to the implementer:\n{user_task}\n\n"
+            history_prefix
+            + f"Task that was given to the implementer:\n{user_task}\n\n"
             f"Architect's plan:\n{state.arch_plan}\n\n"
             f"Implementer's summary:\n{impl_summary}\n\n"
             "Please review the implementation.\n\n"
             "IMPORTANT — start here:\n"
-            "1. Call list_dir('.') to see all project files.\n"
-            "2. Read every SOURCE file (*.py, *.js, *.html, *.css, etc.) using read_file.\n"
-            "3. Do NOT read or report issues about anything inside `.ca_pipeline/` — "
+            "1. Read the '## Codebase History' block above FIRST — it tells you which\n"
+            "   files pre-existed this run and which were newly created or modified.\n"
+            "2. Call list_dir('.') to see all project files.\n"
+            "3. Read every SOURCE file (*.py, *.js, *.html, *.css, etc.) using read_file.\n"
+            "4. Do NOT read or report issues about anything inside `.ca_pipeline/` — "
             "those are internal pipeline artifacts, not project files.\n"
-            "4. Do NOT call write_file or run_shell.\n\n"
+            "5. Do NOT call write_file or run_shell.\n\n"
             "Produce structured findings with ## HIGH Priority, ## MEDIUM Priority, "
             "## LOW Priority, and ## Summary sections.\n\n"
             "After your review, write your complete findings to "

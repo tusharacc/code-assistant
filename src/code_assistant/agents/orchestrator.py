@@ -81,6 +81,7 @@ class Orchestrator:
     def __init__(
         self,
         history: list[Message],
+        req_file: str | None = None,
         debate_enabled: bool | None = None,
         pipeline_enabled: bool | None = None,
         rag_context: str | None = None,
@@ -96,6 +97,7 @@ class Orchestrator:
         # so that req-file triggers ("Please implement everything in requirements.md") are
         # never misclassified as "conversational" and silently dropped.
         self.force_pipeline = force_pipeline
+        self.req_file = req_file          # archived in ca_memory/ after pipeline run
         self._architect: Agent | None = None
         self._implementer: Agent | None = None
 
@@ -395,5 +397,6 @@ class Orchestrator:
             rag_context=self.rag_context,
             initial_history=self.history,   # carries loaded req-file into architect context
             resume=self.resume_pipeline,
+            req_file=self.req_file,         # archived to ca_memory/ after run
         )
         return pipeline.run(user_input)

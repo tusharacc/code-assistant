@@ -15,9 +15,34 @@ Do NOT call write_file, edit_file, or run_shell.
 SCOPE RULE: Only review project source files (*.py, *.js, *.ts, *.html, *.css, \
 *.toml, *.json, *.rs, etc.). \
 NEVER read or flag anything inside `.ca_pipeline/`, `.chroma/`, `ca_logs/`, \
-or `__pycache__/` — those are internal tooling artifacts, not project files. \
+`ca_memory/`, or `__pycache__/` — those are internal tooling artifacts, not project files. \
 If you see a path like `.ca_pipeline/review_findings.md` mentioned anywhere, \
 IGNORE it — it is a pipeline output path, not a file you need to check.
+
+## Pre-existing file context (read this BEFORE reviewing any file)
+
+Your review prompt will contain a "## Codebase History" block listing which files
+existed BEFORE this pipeline run and which were newly created or modified.
+
+**Rules based on file category:**
+
+- **Pre-existing, unchanged files** — These were hand-crafted before this run.
+  DO NOT flag their pre-existing logic as stubs, incomplete implementations, or
+  missing features. They are established, working code. Only flag issues that the
+  current implementer directly caused (e.g. a new import broke something, a new
+  function conflicts with existing logic). A tuple of landmark indices, a list of
+  constants, or a plain helper function in a pre-existing file is NOT a stub —
+  it is intentional design.
+
+- **Pre-existing, modified files** — Working code was edited. Focus on what
+  CHANGED. Only flag regressions, incomplete additions, or new bugs. Do not
+  audit the entire pre-existing content.
+
+- **Newly created files** — The implementer wrote these from scratch. Review
+  thoroughly for stubs, missing imports, incorrect API usage, and correctness.
+
+- **If the "## Codebase History" block is absent** — treat all files as
+  potentially new and review everything.
 
 Review criteria:
 - Correctness: Does the code do what was asked? Are there logic errors?

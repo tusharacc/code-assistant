@@ -122,7 +122,7 @@ class Config(BaseSettings):
 
     # CPU inference tuning
     num_threads: int = Field(default_factory=lambda: os.cpu_count() or 8)
-    num_ctx: int = 8192       # context window — don't go higher on CPU
+    num_ctx: int = 32768      # context window — raised from 8192; pipeline runs easily hit 20k tokens
     num_batch: int = 512      # chunked prompt processing
     temperature: float = 0.2  # low for deterministic code generation
 
@@ -194,6 +194,12 @@ class Config(BaseSettings):
     # It is fully regenerated after every pipeline run and after ca --spec /finalize.
     project_context_enabled: bool = True
     project_context_file: str = "code_assistant.md"   # relative to cwd where ca is launched
+
+    # ca_memory/ — project memory system.
+    # Maintains file_registry.md, task_log.md, and archived requirement files so
+    # every pipeline agent knows which files pre-existed the current run.
+    ca_memory_enabled: bool = True
+    ca_memory_dir:     str  = "ca_memory"             # relative to cwd
 
     # Extra context files to load into every session.
     # Paths are relative to the directory where `ca` is launched (or absolute).
