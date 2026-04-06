@@ -13,6 +13,21 @@ from ..ui.diff import print_diff
 
 log = get_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Read-before-write tracker
+# ---------------------------------------------------------------------------
+# Tracks absolute paths of files read in the current session/pipeline run.
+# write_file and edit_file refuse to modify an existing file unless it has
+# been read first — matching the safety model used by Claude Code's own tools.
+
+_read_files: set[str] = set()
+
+
+def reset_read_tracker() -> None:
+    """Clear read history. Call at the start of each pipeline run."""
+    _read_files.clear()
+    log.debug("read_tracker | reset")
+
 
 def read_file(path: str) -> str:
     """Read and return the contents of a file."""
@@ -26,6 +41,7 @@ def read_file(path: str) -> str:
             log.error("read_file | not a file: %s", path)
             return f"Error: not a file: {path}"
         content = p.read_text(encoding="utf-8", errors="replace")
+        _read_files.add(str(p))
         lines = content.splitlines()
         log.debug("read_file | %s — %d lines, %d chars", path, len(lines), len(content))
         # Return with line numbers so the model can reference specific lines
@@ -108,6 +124,14 @@ def write_file(path: str, content: str, force_overwrite: bool = False) -> str:
             original = p.read_text(encoding="utf-8", errors="replace")
             verb = "overwrite"
 
+            # ── Read-before-write guard ───────────────────────────────────────
+            if str(p) not in _read_files:
+                log.error("write_file | read-before-write guard fired: %s not in read set", path)
+                return (
+                    f"Error: {path} has not been read yet. "
+                    "Call read_file on it before writing to it."
+                )
+
             # ── Regression guard ─────────────────────────────────────────────
             if not force_overwrite:
                 guard_error = _regression_guard(path, original, content)
@@ -163,6 +187,14 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
             return f"Error: file not found: {path}"
 
         original = p.read_text(encoding="utf-8", errors="replace")
+
+        # ── Read-before-write guard ───────────────────────────────────────────
+        if str(p) not in _read_files:
+            log.error("edit_file | read-before-write guard fired: %s not in read set", path)
+            return (
+                f"Error: {path} has not been read yet. "
+                "Call read_file on it before editing it."
+            )
 
         if old_string not in original:
             log.error("edit_file | old_string not found in %s", path)

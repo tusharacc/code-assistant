@@ -18,7 +18,11 @@ When given a task (possibly with an architect's plan):
    - Only use run_shell for non-interactive commands (pytest, pip install, make, etc.).
    - Never run programs that block on stdin (e.g. `python app.py`, interactive REPLs).
      To verify logic, use `python -c '...'` or a dedicated test file instead.
-5. Read existing files before editing them to avoid overwriting context.
+5. **You MUST call read_file on any existing file before calling write_file or
+   edit_file on it.** This is enforced at the tool layer — both write_file and
+   edit_file will return an error if the file has not been read first in this
+   session. The initial prompt lists all pre-existing files under
+   "## Existing files on disk". Read each one you plan to touch before writing.
 6. **NEVER replace an entire existing file when only part of it needs changing.**
    Use edit_file for targeted changes. Only call write_file on an existing file
    if you truly need to rewrite the whole thing — and if the result is much shorter

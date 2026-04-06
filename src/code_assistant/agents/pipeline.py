@@ -308,6 +308,10 @@ class Pipeline:
 
         log.info("Pipeline start | task_chars=%d", len(user_task))
 
+        # Reset read-before-write tracker so each pipeline run starts clean
+        from ..tools.file_ops import reset_read_tracker
+        reset_read_tracker()
+
         # Artifact directory — one per pipeline run, named by timestamp
         from pathlib import Path as _Path
         import time as _time
@@ -451,7 +455,7 @@ class Pipeline:
             t = time.perf_counter()
             before_impl = _snap(impl)
             before_arch = _snap(arch)  # arch may be called during Q&A
-            impl_msgs = self._phase_implementer(user_task, state, arch, impl)
+            impl_msgs = self._phase_implementer(user_task, state, arch, impl, pre_snap=_pre_snap)
             all_messages.extend(impl_msgs)
             self.metrics["implementer"] = _phase_metrics(impl, before_impl, time.perf_counter() - t)
             self.metrics["implementer_qa_arch"] = _phase_metrics(arch, before_arch, 0)
@@ -967,7 +971,12 @@ class Pipeline:
         print_info(f"Context refreshed — AST: {ast_status} · RAG: {rag_status}")
 
     def _phase_implementer(
-        self, user_task: str, state: PipelineState, arch: Agent, impl: Agent
+        self,
+        user_task: str,
+        state: PipelineState,
+        arch: Agent,
+        impl: Agent,
+        pre_snap: dict | None = None,
     ) -> list[Message]:
         """
         Implementer codes the plan. If it asks the architect a question
@@ -976,10 +985,29 @@ class Pipeline:
         """
         all_new: list[Message] = []
 
+        # Build an existing-files block from the pre-run snapshot so the
+        # implementer knows which files are already on disk and must be read
+        # before being overwritten.  write_file / edit_file will hard-fail if
+        # a file is modified without a preceding read_file call.
+        existing_files_block = ""
+        if pre_snap:
+            lines = [
+                "## Existing files on disk — you MUST read before modifying",
+                "The following files already exist. Call read_file on any file",
+                "you intend to modify BEFORE calling write_file or edit_file.",
+                "This is enforced at the tool layer — writes will fail with an",
+                "error if you skip the read step.",
+                "",
+            ]
+            for snap_path, snap in pre_snap.items():
+                lines.append(f"- {snap_path} ({snap.lines} lines)")
+            existing_files_block = "\n".join(lines) + "\n\n"
+
         initial_prompt = (
             f"The architect has proposed this plan:\n\n{state.arch_plan}\n\n"
             f"Original task: {user_task}\n\n"
-            "Now implement it completely. "
+            + existing_files_block
+            + "Now implement it completely. "
             "Your FIRST action MUST be a write_file or edit_file tool call — "
             "do not write any explanatory text before your first tool call. "
             "Write production-ready code — no stubs or placeholders."
