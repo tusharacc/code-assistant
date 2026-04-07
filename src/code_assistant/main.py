@@ -862,9 +862,22 @@ def _run_quick(query: str, log_level: str) -> None:
 
 # ── CLI entry points ──────────────────────────────────────────────────────────
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from importlib.metadata import version as _pkg_version
+        typer.echo(f"ca version {_pkg_version('code-assistant')}")
+        raise typer.Exit()
+
+
 @app.command()
 def main(
     prompt: Optional[str] = typer.Argument(None, help="One-shot prompt (skip REPL)"),
+    version: Optional[bool] = typer.Option(
+        None, "--version", "-v",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show version and exit",
+    ),
     resume: Optional[str] = typer.Option(None, "--resume", "-r", help="Resume a saved session"),
     resume_pipeline: bool = typer.Option(
         False, "--resume-pipeline",

@@ -19,6 +19,17 @@ Three execution paths exist:
 
 ---
 
+## Version
+
+Current version: 1.0
+
+Versioning rules (enforced automatically by `.git/hooks/prepare-commit-msg`):
+- `feat:` / `Feature:` prefix → major bump (e.g. 1.0 → 2.0)
+- `Fix:` / `fix:` prefix → minor bump (e.g. 1.0 → 1.1)
+- All other prefixes → no version change
+
+---
+
 ## Repository layout
 
 ```
