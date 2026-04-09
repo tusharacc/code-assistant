@@ -201,6 +201,10 @@ class Config(BaseSettings):
     ca_memory_enabled: bool = True
     ca_memory_dir:     str  = "ca_memory"             # relative to cwd
 
+    # Auto-generate / update README.md after every pipeline run.
+    # Opt out per-run with --no-readme or set to false in ca.config.
+    readme_enabled: bool = True
+
     # Extra context files to load into every session.
     # Paths are relative to the directory where `ca` is launched (or absolute).
     # Set in ca.config for per-project defaults; override per-run with --context.

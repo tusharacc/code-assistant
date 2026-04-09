@@ -868,6 +868,21 @@ class Pipeline:
         except Exception as _e:
             log.warning("Could not update .ca_pipeline/latest symlink: %s", _e)
 
+        # ── Post-pipeline: README generation ─────────────────────────────
+        # Generates or updates README.md with a comprehensive 11-section
+        # project-level README.  Non-fatal; opt-out via --no-readme or
+        # setting readme_enabled = false in ca.config.
+        try:
+            if config.readme_enabled:
+                from .readme import make_readme_agent
+                print_rule("post-pipeline · readme", style="dim cyan")
+                _readme_agent = make_readme_agent(keep_alive=0)
+                readme_msgs = self._phase_readme(user_task, state, _readme_agent)
+                all_messages.extend(readme_msgs)
+                log.info("README generation complete")
+        except Exception as _readme_err:
+            log.warning("README generation failed (non-fatal): %s", _readme_err)
+
         return all_messages
 
     # ------------------------------------------------------------------
@@ -1423,6 +1438,44 @@ class Pipeline:
         state.doc_output = doc_text
 
         log.info("Phase 7 (docs) complete | doc_chars=%d", len(doc_text))
+        return new_msgs
+
+    def _phase_readme(
+        self, user_task: str, state: PipelineState, readme_agent: Agent
+    ) -> list[Message]:
+        """Post-pipeline README generation.
+
+        Generates or updates README.md using the full pipeline context (arch
+        plan, acceptance criteria, test results) plus live codebase inspection.
+        Runs after all 7 phases complete — non-fatal, opt-out via
+        config.readme_enabled / --no-readme.
+        """
+        sections = []
+        if state.arch_plan:
+            sections.append(f"## Architecture plan\n{state.arch_plan}")
+        if state.acceptance_criteria:
+            sections.append(f"## Acceptance criteria\n{state.acceptance_criteria}")
+        if state.test_results:
+            sections.append(f"## Test results\n{state.test_results}")
+        if state.doc_output:
+            sections.append(f"## Docs phase output (for reference)\n{state.doc_output}")
+
+        context_block = "\n\n".join(sections)
+
+        prompt = (
+            f"Original task: {user_task}\n\n"
+            + (f"{context_block}\n\n" if context_block else "")
+            + "Generate or update README.md for this project.\n"
+            "Follow the instructions in your system prompt:\n"
+            "  1. Call list_dir(\".\") to survey the project.\n"
+            "  2. Call glob_files(\"README.md\") — if found, read it first.\n"
+            "  3. Read any source files you need for accurate tech stack / usage info.\n"
+            "  4. Write the complete README with all 11 sections via write_file(\"README.md\", ...)."
+        )
+
+        readme_history: list[Message] = [Message(role="user", content=prompt)]
+        readme_text, new_msgs = readme_agent.run(readme_history, rag_context=self.rag_context)
+        log.info("_phase_readme complete | response_chars=%d", len(readme_text))
         return new_msgs
 
 

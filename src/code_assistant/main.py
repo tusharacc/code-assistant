@@ -913,6 +913,10 @@ def main(
         file_okay=True, dir_okay=False,
     ),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override implementer model"),
+    no_readme: bool = typer.Option(
+        False, "--no-readme",
+        help="Skip auto-generation of README.md after pipeline run",
+    ),
     no_auto_approve: bool = typer.Option(
         False, "--no-auto-approve",
         help="Prompt for confirmation before every write_file / edit_file / run_shell call",
@@ -949,6 +953,8 @@ def main(
         config.use_pipeline = True
     if model:
         config.implementer_model = model
+    if no_readme:
+        config.readme_enabled = False
     if no_auto_approve:
         config.auto_approve = False
 
