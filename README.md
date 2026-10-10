@@ -20,6 +20,7 @@ After each pipeline run the assistant automatically learns from its own mistakes
    - [Pipeline](#pipeline-mode)
    - [Quick](#quick-mode)
    - [Spec (requirements gathering)](#spec-mode)
+   - [Test (test case generation)](#test-mode)
 7. [Slash commands](#slash-commands)
 8. [Agent tools](#agent-tools)
 9. [RAG — indexing your codebase](#rag--indexing-your-codebase)
@@ -60,6 +61,7 @@ User input
 | Persona | Default model | Tool access | Job |
 |---|---|---|---|
 | **Architect** | `qwen2.5-coder:7b` | None (read-only in spec mode) | Plan, design, acceptance criteria |
+| **Test-Spec** | `qwen2.5-coder:7b` | Read + write | Design test cases, propose coverage |
 | **Implementer** | `qwen2.5-coder:14b` | Full (read, write, edit, shell) | Code, fix, document |
 | **Reviewer** | `qwen2.5-coder:7b` | Read-only | Inspect, produce findings |
 | **Tester** | `qwen2.5-coder:7b` | Read + shell | Run tests, verify criteria |
@@ -298,6 +300,52 @@ ca --pipeline --req-file my_feature.txt
 ```
 
 After `/finalize`, the project's `code_assistant.md` is automatically updated with the new acceptance criteria in an `## Open Requirements` section.
+
+### Test mode
+
+The QA agent helps you create comprehensive test case documents by analyzing requirements and discussing test coverage:
+
+```bash
+# Interactive test case generation → writes test_cases_YYYYMMDD_HHMMSS.md
+ca --test
+
+# Provide a requirement document for context
+ca --test --req-file requirements.txt
+
+# Save test cases to a custom path
+ca --test --test-out tests/test_plan.md
+```
+
+Inside the test REPL:
+
+| Command | Description |
+|---|---|
+| `/finalize` | Write the test case document and exit |
+| `/clear` | Restart the discussion from scratch |
+| `/help` | Show commands |
+| `/exit` | Quit without writing |
+
+The output test document follows this format:
+
+```markdown
+# Test Case Specification
+**Project:** <project name>
+## Overview
+## Test Strategy
+## Unit Tests
+## Integration Tests
+## End-to-End Tests
+## Edge Cases & Error Handling
+## Test Data
+```
+
+Feed test cases into the pipeline alongside requirements:
+
+```bash
+ca --pipeline --req-file spec.txt --test-file test_cases.md
+```
+
+The tester agent will use these test cases during validation (Phase 5-6).
 
 ---
 

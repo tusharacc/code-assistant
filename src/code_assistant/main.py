@@ -153,6 +153,15 @@ SPEC_SLASH_HELP = """
   [cyan]/exit[/cyan]  or Ctrl-D  Quit without writing the spec
 """
 
+TEST_SLASH_HELP = """
+[bold]Test mode slash commands[/bold]
+
+  [cyan]/finalize[/cyan]        Write the test case document and exit
+  [cyan]/clear[/cyan]           Restart the discussion from scratch
+  [cyan]/help[/cyan]            Show this help
+  [cyan]/exit[/cyan]  or Ctrl-D  Quit without writing the test document
+"""
+
 
 class REPL:
     def __init__(
@@ -215,6 +224,31 @@ class REPL:
                     )
             except Exception as _e:
                 self._log.warning("AST outline injection failed (non-fatal): %s", _e)
+
+        # Check for model updates (silent, only notifies if cache exists and has upgrades).
+        # This runs once per 24h (cache TTL), so it won't slow down every startup.
+        try:
+            from .model_discovery import load_cache
+
+            cached = load_cache()
+            if cached:
+                # Cache exists and is fresh — check if there are better models
+                has_upgrades = False
+                for role in ["architect", "implementer"]:
+                    current = cached.current_models.get(role, "")
+                    recs = cached.recommendations.get(role, [])
+                    if recs and recs[0].name != current and recs[0].fits_in_ram:
+                        has_upgrades = True
+                        top_rec = recs[0].name
+                        print_info(
+                            f"💡 Newer model available: [bold]{top_rec}[/bold] "
+                            f"(run [bold cyan]ca --discover-models[/bold cyan] to upgrade)"
+                        )
+                        break  # Only show one notification per startup
+                self._log.debug("Model discovery startup check | upgrades_available=%s", has_upgrades)
+        except Exception as _e:
+            # Non-fatal: model discovery is a nice-to-have, not critical
+            self._log.debug("Model discovery startup check failed (non-fatal): %s", _e)
 
         self._log.info(
             "REPL init | debate=%s pipeline=%s rag_ready=%s ast_ready=%s resumed=%s",
@@ -814,6 +848,185 @@ class SpecREPL:
         ))
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Test Case Generation REPL
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestREPL:
+    """Interactive test case document generation mode."""
+
+    def __init__(self, output_path: Path | None = None, req_file: Path | None = None) -> None:
+        from datetime import datetime
+        self.history: list[Message] = []
+        self._log = get_logger(__name__)
+        self._prompt_session: PromptSession = PromptSession(
+            history=FileHistory(str(_PROMPT_HISTORY_FILE)),
+            auto_suggest=AutoSuggestFromHistory(),
+            style=_PT_STYLE,
+        )
+
+        # Default output path
+        if output_path is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_path = Path(f"test_cases_{timestamp}.md")
+        self.output_path = Path(output_path).resolve()
+
+        # Requirement document path (optional)
+        self.req_file = Path(req_file).resolve() if req_file else None
+
+    def run(self) -> None:
+        from .agents.tester import make_test_spec_agent
+        test_agent = make_test_spec_agent()
+
+        self._print_banner()
+
+        # If req_file provided, load it into context
+        initial_prompt = "Start the test case gathering session. "
+        if self.req_file and self.req_file.exists():
+            try:
+                req_content = self.req_file.read_text(encoding="utf-8")
+                initial_prompt += (
+                    f"The user has provided a requirement document at {self.req_file}. "
+                    f"First, read it using read_file, then analyze the requirements and propose "
+                    f"comprehensive test cases covering unit, integration, and end-to-end scenarios. "
+                    f"Ask clarifying questions about critical paths and edge cases."
+                )
+                print_info(f"Loaded requirement document: {self.req_file}")
+            except Exception as e:
+                print_warning(f"Could not read requirement file: {e}")
+                initial_prompt += (
+                    "Ask the user to describe the project or provide a requirement document path, "
+                    "then help them create comprehensive test cases."
+                )
+        else:
+            initial_prompt += (
+                "Ask the user to describe the project or provide a requirement document path, "
+                "then help them create comprehensive test cases."
+            )
+
+        # Test agent opens the interview
+        self._call_test_agent(
+            test_agent,
+            Message(role="user", content=initial_prompt),
+        )
+
+        while True:
+            try:
+                raw = self._prompt_session.prompt("\n❯ ", multiline=False).strip()
+            except (EOFError, KeyboardInterrupt):
+                self._log.info("Test REPL exited (EOF/KeyboardInterrupt)")
+                console.print("\n[dim]Test session ended — no file written.[/dim]")
+                break
+
+            if not raw:
+                continue
+
+            if raw.startswith("/"):
+                should_exit = self._handle_slash(raw, test_agent)
+                if should_exit:
+                    break
+            else:
+                self._call_test_agent(test_agent, Message(role="user", content=raw))
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    def _call_test_agent(self, test_agent, user_msg: Message) -> str:
+        """Append user_msg to history, run test agent, extend history, return text."""
+        self.history.append(user_msg)
+        text, new_msgs = test_agent.run(self.history)
+        self.history.extend(new_msgs)
+        return text
+
+    def _handle_slash(self, raw: str, test_agent) -> bool:
+        """Handle a slash command.  Returns True if the REPL should exit."""
+        parts = raw.split(maxsplit=1)
+        cmd = parts[0].lower()
+
+        if cmd in ("/exit", "/quit", "/q"):
+            console.print("[dim]Test session ended — no file written.[/dim]")
+            return True
+
+        elif cmd == "/finalize":
+            self._finalize(test_agent)
+            return True
+
+        elif cmd == "/clear":
+            self.history.clear()
+            print_success("Discussion cleared — starting over.")
+            self._call_test_agent(
+                test_agent,
+                Message(
+                    role="user",
+                    content=(
+                        "The discussion has been reset. Ask the user again about their "
+                        "project and what test cases they need."
+                    ),
+                ),
+            )
+
+        elif cmd == "/help":
+            console.print(TEST_SLASH_HELP)
+
+        else:
+            print_error(f"Unknown command: {cmd}. Type /help")
+
+        return False
+
+    def _finalize(self, test_agent) -> None:
+        """Ask the test agent to write the test case document."""
+        print_info(f"Generating test case document → {self.output_path}")
+        finalize_msg = Message(
+            role="user",
+            content=(
+                f"The user is satisfied with the discussion. Please now write the complete "
+                f"test case document using write_file to this exact path:\n\n"
+                f"  {self.output_path}\n\n"
+                f"Follow the Test Case Specification format from your instructions. Include:\n"
+                f"- Overview and test strategy\n"
+                f"- Unit test scenarios with specific test data\n"
+                f"- Integration test scenarios\n"
+                f"- End-to-end test scenarios\n"
+                f"- Edge cases and error handling tests\n"
+                f"- Performance/security tests if applicable\n"
+                f"Make each test case actionable with clear steps and expected results."
+            ),
+        )
+        self._call_test_agent(test_agent, finalize_msg)
+
+        if self.output_path.exists():
+            print_success(f"\nTest case document written: {self.output_path}")
+            console.print(
+                Panel(
+                    f"[bold]To implement with these test cases, run:[/bold]\n\n"
+                    f"  [bold cyan]ca --pipeline --req-file <spec.txt> --test-file {self.output_path}[/bold cyan]\n\n"
+                    f"[dim]Or load the test cases into an existing pipeline:[/dim]\n"
+                    f"  [bold cyan]ca --pipeline --test-file {self.output_path}[/bold cyan]",
+                    border_style="green",
+                    padding=(0, 2),
+                )
+            )
+        else:
+            print_warning(
+                f"Test case document not detected at {self.output_path}.\n"
+                "Check the output above — it may have been saved to a different path."
+            )
+
+    # ── Display ────────────────────────────────────────────────────────
+
+    def _print_banner(self) -> None:
+        req_info = f"\n[dim]Requirement doc:[/dim] [cyan]{self.req_file}[/cyan]" if self.req_file else ""
+        console.print(Panel(
+            f"[bold white]Code Assistant — Test Case Generation Mode[/bold white]\n\n"
+            f"[dim]The QA agent will help you create comprehensive test cases.[/dim]\n"
+            f"[dim]When satisfied, type [bold cyan]/finalize[/bold cyan] to generate the test document.[/dim]\n{req_info}\n"
+            f"[dim]Test output:[/dim] [cyan]{self.output_path}[/cyan]\n"
+            f"[dim]Commands: [bold]/finalize[/bold] · [bold]/clear[/bold] · "
+            f"[bold]/help[/bold] · [bold]/exit[/bold][/dim]",
+            border_style="magenta",
+            padding=(0, 1),
+        ))
+
+
 # ── Quick mode helper ─────────────────────────────────────────────────────────
 
 def _run_quick(query: str, log_level: str) -> None:
@@ -912,6 +1125,24 @@ def main(
         help="Output path for the spec document (default: spec_YYYYMMDD_HHMMSS.txt in current dir)",
         file_okay=True, dir_okay=False,
     ),
+    test: bool = typer.Option(
+        False, "--test", "-t",
+        help="Test case generation mode: discuss test scenarios with the QA agent, then write a test document",
+    ),
+    test_out: Optional[Path] = typer.Option(
+        None, "--test-out",
+        help="Output path for the test case document (default: test_cases_YYYYMMDD_HHMMSS.md in current dir)",
+        file_okay=True, dir_okay=False,
+    ),
+    test_file: Optional[Path] = typer.Option(
+        None, "--test-file",
+        help="Path to a test case document file to load into pipeline context",
+        exists=True, file_okay=True, dir_okay=False, readable=True,
+    ),
+    discover_models: bool = typer.Option(
+        False, "--discover-models",
+        help="Discover and recommend better models based on your hardware, then exit",
+    ),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override implementer model"),
     no_readme: bool = typer.Option(
         False, "--no-readme",
@@ -964,6 +1195,108 @@ def main(
         spec_repl.run()
         return
 
+    # ── Test mode — QA-driven test case generation ───────────────────
+    if test:
+        test_repl = TestREPL(output_path=test_out, req_file=req_file)
+        test_repl.run()
+        return
+
+    # ── Model discovery mode — find better models based on hardware ───
+    if discover_models:
+        try:
+            from .model_discovery import get_recommendations, format_recommendations_table
+
+            console.print("\n[dim]🔍 Analyzing hardware and querying Ollama library...[/dim]\n")
+
+            result = get_recommendations(use_cache=False)  # Force fresh query in CLI mode
+            if not result:
+                print_error("Failed to fetch model recommendations. Check your internet connection.")
+                raise typer.Exit(1)
+
+            # Display recommendations table
+            table = format_recommendations_table(result)
+            console.print(table)
+            console.print()
+
+            # Check if any recommendations differ from current models
+            has_upgrades = False
+            upgrade_roles = []
+            for role in ["architect", "implementer", "reviewer", "tester"]:
+                current = result.current_models.get(role, "")
+                recs = result.recommendations.get(role, [])
+                if recs and recs[0].name != current and recs[0].fits_in_ram:
+                    has_upgrades = True
+                    upgrade_roles.append(role)
+
+            if not has_upgrades:
+                print_success("You're already using the recommended models for your hardware! 🎉")
+                return
+
+            # Offer to update config
+            console.print("\n[bold]Update configuration with recommended models?[/bold]")
+            console.print("[dim]This will modify ~/.code-assistant/config.toml (machine-level config)[/dim]")
+
+            if not confirm("Apply recommendations?"):
+                print_info("No changes made. You can run this command again anytime.")
+                return
+
+            # Update machine-level config file
+            machine_config = Path.home() / ".code-assistant" / "config.toml"
+            machine_config.parent.mkdir(parents=True, exist_ok=True)
+
+            # Read existing config or start fresh
+            if machine_config.exists():
+                current_content = machine_config.read_text(encoding="utf-8")
+            else:
+                current_content = "# Code Assistant machine-level configuration\n\n"
+
+            # Build updates
+            import re
+            updates = {}
+            for role, key in [
+                ("architect", "architect_model"),
+                ("implementer", "implementer_model"),
+                ("reviewer", "reviewer_model"),
+                ("tester", "tester_model"),
+            ]:
+                recs = result.recommendations.get(role, [])
+                if recs and recs[0].name != result.current_models.get(role, "") and recs[0].fits_in_ram:
+                    updates[key] = recs[0].name
+
+            # Apply updates to config content
+            for key, value in updates.items():
+                # Check if key already exists in file
+                pattern = rf'^{key}\s*=.*$'
+                if re.search(pattern, current_content, re.MULTILINE):
+                    # Update existing line
+                    current_content = re.sub(
+                        pattern,
+                        f'{key} = "{value}"',
+                        current_content,
+                        flags=re.MULTILINE,
+                    )
+                else:
+                    # Append new line
+                    current_content += f'{key} = "{value}"\n'
+
+            # Write updated config
+            machine_config.write_text(current_content, encoding="utf-8")
+
+            print_success(f"✓ Updated {machine_config}")
+            for key, value in updates.items():
+                print_info(f"  {key} → {value}")
+            console.print("\n[bold green]Restart `ca` to use the new models.[/bold green]")
+
+            return
+
+        except ImportError:
+            print_error("Model discovery requires psutil: pip install psutil")
+            raise typer.Exit(1)
+        except Exception as e:
+            log.exception("Model discovery failed")
+            print_error(f"Model discovery failed: {e}")
+            raise typer.Exit(1)
+
     repl = REPL(resume=resume, resume_pipeline=resume_pipeline, force_pipeline=bool(pipeline))
 
     # ── Load requirement document into context ───────────────────────
@@ -982,6 +1315,16 @@ def main(
                 )
         except Exception as e:
             print_error(f"Could not read requirement file {req_file}: {e}")
+            raise typer.Exit(1)
+
+    # ── Load test case document into context ─────────────────────────
+    if test_file:
+        try:
+            test_content = test_file.read_text(encoding="utf-8", errors="replace")
+            repl.history.add_context_file(str(test_file.resolve()), test_content)
+            print_success(f"Loaded test case document: {test_file} ({len(test_content)} chars)")
+        except Exception as e:
+            print_error(f"Could not read test case file {test_file}: {e}")
             raise typer.Exit(1)
 
     # Load explicit context files (--context flags + config.context_files).

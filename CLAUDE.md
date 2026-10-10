@@ -21,7 +21,7 @@ Three execution paths exist:
 
 ## Version
 
-Current version: 2.0
+Current version: 3.0
 
 Versioning rules (enforced automatically by `.git/hooks/prepare-commit-msg`):
 - `feat:` / `Feature:` prefix → major bump (e.g. 1.0 → 2.0)
